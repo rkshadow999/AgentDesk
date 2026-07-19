@@ -11,6 +11,7 @@ $ErrorActionPreference = "Stop"
 $buildScript = Join-Path $PSScriptRoot "Build-AgentDeskPackage.ps1"
 $noticeGenerator = Join-Path $PSScriptRoot "Generate-AgentDeskThirdPartyNotices.ps1"
 $engineArchitectureVerifier = Join-Path $PSScriptRoot "Test-AgentDeskEngineArchitecture.ps1"
+$engineRevisionTest = Join-Path $PSScriptRoot "Test-AgentDeskEngineRevision.ps1"
 $linuxEngineArchitectureVerifier = Join-Path $PSScriptRoot "Test-AgentDeskLinuxEngineArchitecture.ps1"
 $rollbackTest = Join-Path $PSScriptRoot "Test-AgentDeskRollbackBundle.ps1"
 $updateManifestTest = Join-Path $PSScriptRoot "Test-AgentDeskUpdateManifest.ps1"
@@ -25,6 +26,7 @@ $rustVersionBuildScripts = @(
 & $rollbackTest
 & $updateFeedAdvanceTest
 & $wslInstallerTest
+& $engineRevisionTest
 
 foreach ($rustVersionBuildScript in $rustVersionBuildScripts) {
     $source = Get-Content -LiteralPath $rustVersionBuildScript -Raw

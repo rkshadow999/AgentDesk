@@ -124,6 +124,131 @@ function Copy-RequiredFile {
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
 }
 
+function Assert-NativeEngineRevision {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ExpectedRevision
+    )
+
+    $normalizedRevision = $ExpectedRevision.Trim()
+    if ($normalizedRevision -notmatch '^[0-9A-Fa-f]{7,40}$') {
+        throw "SourceRevision must be a hexadecimal Git revision with at least 7 characters: $ExpectedRevision"
+    }
+
+    $timeoutMilliseconds = 5000
+    $maximumOutputCharacters = 16 * 1024
+    $process = [System.Diagnostics.Process]::new()
+    $processStarted = $false
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Path
+    $startInfo.Arguments = "--version"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process.StartInfo = $startInfo
+    $stdout = [System.Text.StringBuilder]::new()
+    $stderr = [System.Text.StringBuilder]::new()
+    $stdoutBuffer = [char[]]::new(1024)
+    $stderrBuffer = [char[]]::new(1024)
+    $stdoutComplete = $false
+    $stderrComplete = $false
+    $stdoutRead = $null
+    $stderrRead = $null
+    try {
+        $processStarted = $process.Start()
+        if (-not $processStarted) {
+            throw "Native sidecar --version could not be started: $Path"
+        }
+        $stdoutRead = $process.StandardOutput.ReadAsync($stdoutBuffer, 0, $stdoutBuffer.Length)
+        $stderrRead = $process.StandardError.ReadAsync($stderrBuffer, 0, $stderrBuffer.Length)
+        $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds($timeoutMilliseconds)
+        while (-not ($stdoutComplete -and $stderrComplete -and $process.HasExited)) {
+            if (-not $stdoutComplete -and $stdoutRead.IsCompleted) {
+                $charactersRead = $stdoutRead.GetAwaiter().GetResult()
+                if ($charactersRead -eq 0) {
+                    $stdoutComplete = $true
+                }
+                else {
+                    if ($stdout.Length + $stderr.Length + $charactersRead -gt $maximumOutputCharacters) {
+                        throw "Native sidecar --version output exceeded $maximumOutputCharacters characters: $Path"
+                    }
+                    [void]$stdout.Append($stdoutBuffer, 0, $charactersRead)
+                    $stdoutRead = $process.StandardOutput.ReadAsync(
+                        $stdoutBuffer,
+                        0,
+                        $stdoutBuffer.Length)
+                }
+            }
+            if (-not $stderrComplete -and $stderrRead.IsCompleted) {
+                $charactersRead = $stderrRead.GetAwaiter().GetResult()
+                if ($charactersRead -eq 0) {
+                    $stderrComplete = $true
+                }
+                else {
+                    if ($stdout.Length + $stderr.Length + $charactersRead -gt $maximumOutputCharacters) {
+                        throw "Native sidecar --version output exceeded $maximumOutputCharacters characters: $Path"
+                    }
+                    [void]$stderr.Append($stderrBuffer, 0, $charactersRead)
+                    $stderrRead = $process.StandardError.ReadAsync(
+                        $stderrBuffer,
+                        0,
+                        $stderrBuffer.Length)
+                }
+            }
+            if ([DateTimeOffset]::UtcNow -ge $deadline) {
+                throw "Native sidecar --version timed out after $timeoutMilliseconds milliseconds: $Path"
+            }
+            $process.Refresh()
+            if (-not ($stdoutComplete -and $stderrComplete -and $process.HasExited)) {
+                Start-Sleep -Milliseconds 10
+            }
+        }
+        $process.WaitForExit()
+        $process.Refresh()
+        if ($process.ExitCode -ne 0) {
+            throw "Native sidecar --version exited with code $($process.ExitCode): $Path"
+        }
+
+        $versionOutput = $stdout.ToString() + "`n" + $stderr.ToString()
+        $revisionTokens = [System.Text.RegularExpressions.Regex]::Matches(
+            $versionOutput,
+            '(?i)(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])')
+        $revisionMatches = $false
+        foreach ($tokenMatch in $revisionTokens) {
+            $token = $tokenMatch.Value
+            $comparisonLength = [Math]::Min(
+                12,
+                [Math]::Min($normalizedRevision.Length, $token.Length))
+            if ($comparisonLength -ge 7 -and [string]::Equals(
+                    $normalizedRevision.Substring(0, $comparisonLength),
+                    $token.Substring(0, $comparisonLength),
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                $revisionMatches = $true
+                break
+            }
+        }
+        if (-not $revisionMatches) {
+            $expectedPrefixLength = [Math]::Min(12, $normalizedRevision.Length)
+            $expectedPrefix = $normalizedRevision.Substring(0, $expectedPrefixLength)
+            throw "Native sidecar revision mismatch; expected revision prefix $expectedPrefix in --version output: $Path"
+        }
+    }
+    finally {
+        if ($processStarted) {
+            if (-not $process.HasExited) {
+                try {
+                    $process.Kill()
+                    $process.WaitForExit()
+                }
+                catch {
+                }
+            }
+        }
+        $process.Dispose()
+    }
+}
+
 function ConvertTo-WindowsVersions {
     param([Parameter(Mandatory)][string]$InputVersion)
 
@@ -243,6 +368,7 @@ else {
         throw "Native sidecar was not found: $NativeEnginePath"
     }
     & $engineArchitectureVerifierPath -Path $NativeEnginePath -Architecture $Architecture
+    Assert-NativeEngineRevision -Path $NativeEnginePath -ExpectedRevision $SourceRevision
     if ($WslEnginePath -and -not (Test-Path -LiteralPath $WslEnginePath -PathType Leaf)) {
         throw "WSL sidecar was not found: $WslEnginePath"
     }
