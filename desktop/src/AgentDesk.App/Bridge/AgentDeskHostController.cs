@@ -2412,13 +2412,7 @@ public sealed partial class AgentDeskHostController :
                     }
 
                     CollectRuntimeOperationCancellationsUnsafe(runtimeOperationCancellations);
-                    var engineEpoch = ActivateEngineSessionUnsafe(context.Client, targetSession);
                     _confirmedSessionMode = null;
-                    Publish(
-                        new SessionActiveChangedWebEvent(
-                            command.SessionId,
-                            command.WorkspacePath,
-                            engineEpoch));
                     if (!string.Equals(
                             context.SessionId.Value,
                             targetSession.Value,
@@ -2427,9 +2421,21 @@ public sealed partial class AgentDeskHostController :
                         var engineWorkspacePath = string.IsNullOrWhiteSpace(_host?.EngineWorkspacePath)
                             ? command.WorkspacePath
                             : _host.EngineWorkspacePath;
-                        await context.Client
-                            .LoadSessionAsync(targetSession, engineWorkspacePath, cancellationToken)
+                        _ = await LoadAndActivateSessionAsync(
+                                context.Client,
+                                targetSession,
+                                engineWorkspacePath,
+                                engineEpoch => Publish(
+                                    new SessionActiveChangedWebEvent(
+                                        command.SessionId,
+                                        command.WorkspacePath,
+                                        engineEpoch)),
+                                cancellationToken)
                             .ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        _ = ActivateEngineSessionUnsafe(context.Client, targetSession);
                     }
                     _confirmedSessionMode ??= SessionMode.Default;
                 }
@@ -2879,10 +2885,15 @@ public sealed partial class AgentDeskHostController :
                     }
                     try
                     {
-                        await client
-                            .LoadSessionAsync(
+                        _ = await LoadAndActivateSessionAsync(
+                                client,
                                 recoveryTarget.SessionId,
                                 engineWorkspacePath,
+                                engineEpoch => Publish(
+                                    new SessionActiveChangedWebEvent(
+                                        recoveryTarget.SessionId.Value,
+                                        workspacePath,
+                                        engineEpoch)),
                                 handshakeCancellation.Token)
                             .ConfigureAwait(false);
                     }
@@ -2909,7 +2920,10 @@ public sealed partial class AgentDeskHostController :
                     $"The ACP startup handshake did not complete within {_options.AcpHandshakeTimeout}.",
                     exception);
             }
-            _ = ActivateEngineSessionUnsafe(client, sessionId);
+            if (recoveryTarget is null)
+            {
+                _ = ActivateEngineSessionUnsafe(client, sessionId);
+            }
             _confirmedSessionMode = recoveryTarget is null ? SessionMode.Default : null;
             _crashRecoveryTarget = null;
             await TrySaveCrashRecoveryMarkerUnsafeAsync(
@@ -3214,6 +3228,13 @@ public sealed partial class AgentDeskHostController :
     {
         lock (_eventGate)
         {
+            if (ReferenceEquals(_client, client) &&
+                _clientEventHandler is not null &&
+                string.Equals(_sessionId?.Value, sessionId.Value, StringComparison.Ordinal))
+            {
+                return Volatile.Read(ref _engineEventEpoch);
+            }
+
             if (_clientEventHandler is not null && _client is not null)
             {
                 _client.EventReceived -= _clientEventHandler;
@@ -3227,6 +3248,85 @@ public sealed partial class AgentDeskHostController :
             client.EventReceived += eventHandler;
             return engineEpoch;
         }
+    }
+
+    private async Task<long> LoadAndActivateSessionAsync(
+        IEngineClient client,
+        SessionId sessionId,
+        string workingDirectory,
+        Action<long> onActivated,
+        CancellationToken cancellationToken)
+    {
+        var replayGate = new object();
+        var replay = new List<EngineEvent>();
+        var active = false;
+        var abandoned = false;
+        long engineEpoch = 0;
+        void BufferOrForward(object? sender, EngineEvent engineEvent)
+        {
+            lock (replayGate)
+            {
+                if (abandoned ||
+                    !ReferenceEquals(sender, client) ||
+                    !string.Equals(
+                        engineEvent.SessionId.Value,
+                        sessionId.Value,
+                        StringComparison.Ordinal))
+                {
+                    return;
+                }
+                if (!active)
+                {
+                    replay.Add(engineEvent);
+                    return;
+                }
+            }
+
+            OnEngineEventReceived(engineEpoch, sender, engineEvent);
+        }
+        EventHandler<EngineEvent> eventHandler = BufferOrForward;
+        client.EventReceived += eventHandler;
+
+        try
+        {
+            await client
+                .LoadSessionAsync(sessionId, workingDirectory, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            lock (replayGate)
+            {
+                abandoned = true;
+                replay.Clear();
+            }
+            client.EventReceived -= eventHandler;
+            throw;
+        }
+
+        lock (replayGate)
+        {
+            lock (_eventGate)
+            {
+                if (_clientEventHandler is not null && _client is not null)
+                {
+                    _client.EventReceived -= _clientEventHandler;
+                }
+
+                _sessionId = sessionId;
+                engineEpoch = Interlocked.Increment(ref _engineEventEpoch);
+                _clientEventHandler = eventHandler;
+            }
+
+            onActivated(engineEpoch);
+            foreach (var engineEvent in replay)
+            {
+                OnEngineEventReceived(engineEpoch, client, engineEvent);
+            }
+            replay.Clear();
+            active = true;
+        }
+        return engineEpoch;
     }
 
     private void OnEngineEventReceived(

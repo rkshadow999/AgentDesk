@@ -2213,6 +2213,158 @@ public sealed class AgentDeskHostControllerTests
     }
 
     [Fact]
+    public async Task SessionOpen_ProjectsLoadReplayEventsBeforeLoadReturnsInOrder()
+    {
+        var fixture = new ControllerFixture();
+        var engine = fixture.Factory.EnqueueEngine("C:\\workspace", "new-session");
+        engine.LoadSessionHandler = async (sessionId, _, _) =>
+        {
+            engine.EmitText(sessionId, "history-one");
+            await Task.Yield();
+            engine.EmitText(sessionId, "history-two");
+        };
+        await using var controller = fixture.CreateController();
+
+        await controller.HandleAsync(
+            new SessionOpenWebCommand(
+                "saved-session",
+                "C:\\workspace",
+                ExecutionProfile.NativeProtected));
+
+        var replay = fixture.Events.Snapshot()
+            .OfType<SessionUpdateWebEvent>()
+            .Where(item => item.SessionId == "saved-session")
+            .ToArray();
+        Assert.Equal(
+            ["history-one", "history-two"],
+            replay.Select(item => item.Text).OfType<string>());
+        Assert.Equal(1, engine.EventReceivedAddCount);
+        Assert.Equal(0, engine.EventReceivedRemoveCount);
+        Assert.Equal(1, engine.EventReceivedSubscriberCount);
+    }
+
+    [Fact]
+    public async Task SessionOpen_LoadFailureRemovesReplaySubscription()
+    {
+        var fixture = new ControllerFixture();
+        var engine = fixture.Factory.EnqueueEngine("C:\\workspace", "new-session");
+        engine.LoadSessionHandler = async (sessionId, _, _) =>
+        {
+            engine.EmitText(sessionId, "partial-history");
+            await Task.Yield();
+            throw new InvalidOperationException("load failed");
+        };
+        await using var controller = fixture.CreateController();
+
+        await controller.HandleAsync(
+            new SessionOpenWebCommand(
+                "saved-session",
+                "C:\\workspace",
+                ExecutionProfile.NativeProtected));
+
+        Assert.Equal(1, engine.EventReceivedAddCount);
+        Assert.Equal(1, engine.EventReceivedRemoveCount);
+        Assert.Equal(0, engine.EventReceivedSubscriberCount);
+        Assert.Equal(1, fixture.Factory.Hosts[0].DisposeCount);
+        Assert.DoesNotContain(
+            fixture.Events.Snapshot(),
+            item => item is SessionUpdateWebEvent { SessionId: "saved-session" });
+    }
+
+    [Fact]
+    public async Task SessionOpen_InitializeFailureDoesNotSubscribeEngineEvents()
+    {
+        var fixture = new ControllerFixture();
+        var engine = fixture.Factory.EnqueueEngine("C:\\workspace", "new-session");
+        engine.InitializeHandler = _ =>
+            Task.FromException<EngineCapabilities>(new InvalidOperationException("initialize failed"));
+        await using var controller = fixture.CreateController();
+
+        await controller.HandleAsync(
+            new SessionOpenWebCommand(
+                "saved-session",
+                "C:\\workspace",
+                ExecutionProfile.NativeProtected));
+
+        Assert.Equal(0, engine.EventReceivedAddCount);
+        Assert.Equal(0, engine.EventReceivedRemoveCount);
+        Assert.Equal(0, engine.EventReceivedSubscriberCount);
+        Assert.Equal(1, fixture.Factory.Hosts[0].DisposeCount);
+    }
+
+    [Fact]
+    public async Task ReplacingEngine_RemovesPreviousGenerationReplaySubscription()
+    {
+        var fixture = new ControllerFixture();
+        var firstEngine = fixture.Factory.EnqueueEngine("C:\\workspace", "new-session");
+        firstEngine.LoadSessionHandler = (sessionId, _, _) =>
+        {
+            firstEngine.EmitText(sessionId, "first-history");
+            return Task.CompletedTask;
+        };
+        await using var controller = fixture.CreateController();
+        await controller.HandleAsync(
+            new SessionOpenWebCommand(
+                "first-session",
+                "C:\\workspace",
+                ExecutionProfile.NativeProtected));
+
+        var secondEngine = fixture.Factory.EnqueueEngine("C:\\workspace-two", "new-session-two");
+        secondEngine.LoadSessionHandler = (sessionId, _, _) =>
+        {
+            secondEngine.EmitText(sessionId, "second-history");
+            return Task.CompletedTask;
+        };
+        Assert.True(await controller.UpdateWorkspaceAsync("C:\\workspace-two"));
+        await controller.HandleAsync(
+            new SessionOpenWebCommand(
+                "second-session",
+                "C:\\workspace-two",
+                ExecutionProfile.NativeProtected));
+
+        firstEngine.EmitText(new SessionId("first-session"), "stale-history");
+        var replay = fixture.Events.Snapshot()
+            .OfType<SessionUpdateWebEvent>()
+            .Select(item => item.Text)
+            .OfType<string>()
+            .ToArray();
+        Assert.Equal(["first-history", "second-history"], replay);
+        Assert.Equal(1, firstEngine.EventReceivedAddCount);
+        Assert.Equal(1, firstEngine.EventReceivedRemoveCount);
+        Assert.Equal(0, firstEngine.EventReceivedSubscriberCount);
+        Assert.Equal(1, secondEngine.EventReceivedAddCount);
+        Assert.Equal(0, secondEngine.EventReceivedRemoveCount);
+        Assert.Equal(1, secondEngine.EventReceivedSubscriberCount);
+        Assert.Equal(1, fixture.Factory.Hosts[0].StopCount);
+    }
+
+    [Fact]
+    public async Task Dispose_RemovesActiveReplaySubscription()
+    {
+        var fixture = new ControllerFixture();
+        var engine = fixture.Factory.EnqueueEngine("C:\\workspace", "new-session");
+        engine.LoadSessionHandler = (sessionId, _, _) =>
+        {
+            engine.EmitText(sessionId, "history");
+            return Task.CompletedTask;
+        };
+        var controller = fixture.CreateController();
+        await controller.HandleAsync(
+            new SessionOpenWebCommand(
+                "saved-session",
+                "C:\\workspace",
+                ExecutionProfile.NativeProtected));
+
+        await controller.DisposeAsync();
+
+        Assert.Equal(1, engine.EventReceivedAddCount);
+        Assert.Equal(1, engine.EventReceivedRemoveCount);
+        Assert.Equal(0, engine.EventReceivedSubscriberCount);
+        Assert.Equal(1, fixture.Factory.Hosts[0].StopCount);
+        Assert.Equal(1, fixture.Factory.Hosts[0].DisposeCount);
+    }
+
+    [Fact]
     public async Task NotificationSessionOpen_ResolvesTheWorkspaceFromTheLocalIndex()
     {
         var fixture = new ControllerFixture();
@@ -6408,13 +6560,33 @@ public sealed class AgentDeskHostControllerTests
 
     private sealed class RecordingEngineClient(string sessionId) : IEngineClient
     {
-        public event EventHandler<EngineEvent>? EventReceived;
+        private EventHandler<EngineEvent>? _eventReceived;
+
+        public event EventHandler<EngineEvent>? EventReceived
+        {
+            add
+            {
+                EventReceivedAddCount++;
+                _eventReceived += value;
+            }
+            remove
+            {
+                EventReceivedRemoveCount++;
+                _eventReceived -= value;
+            }
+        }
 
         public event EventHandler<PermissionRequest>? PermissionRequested;
 
         public event EventHandler<EngineFaultedEventArgs>? Faulted;
 
         public EngineCapabilities Capabilities { get; private set; } = EngineCapabilities.Uninitialized;
+
+        public int EventReceivedAddCount { get; private set; }
+
+        public int EventReceivedRemoveCount { get; private set; }
+
+        public int EventReceivedSubscriberCount => _eventReceived?.GetInvocationList().Length ?? 0;
 
         public List<string> Calls { get; } = [];
 
@@ -7163,7 +7335,7 @@ public sealed class AgentDeskHostControllerTests
                 }
                 """);
             LastUpdate = document.RootElement.Clone();
-            EventReceived?.Invoke(
+            _eventReceived?.Invoke(
                 this,
                 new EngineEvent(activeSessionId, "agent_message_chunk", LastUpdate, metadata: null));
         }
@@ -7172,14 +7344,14 @@ public sealed class AgentDeskHostControllerTests
         {
             using var document = JsonDocument.Parse(json);
             LastUpdate = document.RootElement.Clone();
-            EventReceived?.Invoke(
+            _eventReceived?.Invoke(
                 this,
                 new EngineEvent(activeSessionId, updateKind, LastUpdate, metadata: null));
         }
 
         public Action<EngineEvent> CaptureEventEmitter()
         {
-            var handlers = EventReceived;
+            var handlers = _eventReceived;
             return update => handlers?.Invoke(this, update);
         }
 
