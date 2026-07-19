@@ -261,6 +261,81 @@ public sealed class SidecarProcessHostTests
         Assert.Equal("89abcdef", fixture.Host.CapturedStandardError);
     }
 
+    [Fact]
+    public async Task StandardErrorObserverSeesEarlyOutputBeyondTheCaptureTail()
+    {
+        const string earlyMarker = "provider-secret-early";
+        var standardError = earlyMarker + new string('x', 70 * 1024);
+        await using var fixture = new HostFixture(standardError: standardError);
+        var observed = false;
+        var options = fixture.Options with
+        {
+            CaptureStandardError = true,
+            StandardErrorCharacterLimit = 8,
+            StopTimeout = TimeSpan.FromSeconds(1),
+            StandardErrorObserver = chunk =>
+            {
+                if (chunk.Span.IndexOf(earlyMarker.AsSpan(), StringComparison.Ordinal) >= 0)
+                {
+                    observed = true;
+                }
+            },
+        };
+
+        _ = await fixture.Host.StartAsync(options);
+        await fixture.Process.StandardErrorRead.Task.WaitAsync(fixture.Timeout.Token);
+        await fixture.Host.StopAsync();
+
+        Assert.True(observed);
+        Assert.DoesNotContain(earlyMarker, fixture.Host.CapturedStandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task StandardErrorObserverRunsWithoutRetainingDiagnosticBody()
+    {
+        const string marker = "provider-secret-discarded";
+        await using var fixture = new HostFixture(standardError: marker);
+        var observed = false;
+
+        _ = await fixture.Host.StartAsync(fixture.Options with
+        {
+            StopTimeout = TimeSpan.FromSeconds(1),
+            CaptureStandardError = false,
+            StandardErrorObserver = chunk =>
+                observed |= chunk.Span.IndexOf(marker.AsSpan(), StringComparison.Ordinal) >= 0,
+        });
+        await fixture.Process.StandardErrorRead.Task.WaitAsync(fixture.Timeout.Token);
+        await fixture.Host.StopAsync();
+
+        Assert.True(observed);
+        Assert.Equal(string.Empty, fixture.Host.CapturedStandardError);
+    }
+
+    [Fact]
+    public async Task StopAsyncDrainsStandardErrorWrittenAsTheProcessExits()
+    {
+        const string exitMarker = "provider-secret-at-exit";
+        await using var fixture = new HostFixture(standardErrorAtExit: exitMarker);
+        var observed = false;
+        var options = fixture.Options with
+        {
+            StopTimeout = TimeSpan.FromSeconds(1),
+            StandardErrorObserver = chunk =>
+            {
+                if (chunk.Span.IndexOf(exitMarker.AsSpan(), StringComparison.Ordinal) >= 0)
+                {
+                    observed = true;
+                }
+            },
+        };
+
+        _ = await fixture.Host.StartAsync(options);
+        fixture.Process.Exit(0);
+        await fixture.Host.StopAsync();
+
+        Assert.True(observed);
+    }
+
     private sealed class HostFixture : IAsyncDisposable
     {
         private readonly string _root;
@@ -268,14 +343,18 @@ public sealed class SidecarProcessHostTests
         public HostFixture(
             ExecutionProfile profile = ExecutionProfile.NativeProtected,
             string standardError = "",
-            bool blockClientOutput = false)
+            bool blockClientOutput = false,
+            string standardErrorAtExit = "")
         {
             _root = Path.Combine(Path.GetTempPath(), $"agentdesk-host-{Guid.NewGuid():N}");
             Directory.CreateDirectory(_root);
             var enginePath = Path.Combine(_root, "agentdesk-engine.exe");
             File.WriteAllBytes(enginePath, []);
 
-            Process = new FakeSidecarProcess(standardError, blockClientOutput);
+            Process = new FakeSidecarProcess(
+                standardError,
+                blockClientOutput,
+                standardErrorAtExit);
             Factory = new FakeSidecarProcessFactory(Process);
             var converter = new FakeWslPathConverter("/mnt/c/agentdesk-host");
             Host = new SidecarProcessHost(
@@ -344,20 +423,40 @@ public sealed class SidecarProcessHostTests
         private readonly Pipe _clientToServer = new();
         private readonly StreamReader _clientMessages;
         private readonly TaskCompletionSource _exit = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly Pipe _standardErrorPipe;
         private readonly TrackingReadStream _standardError;
+        private readonly string _standardErrorAtExit;
         private readonly Stream _standardOutput;
         private readonly BlockingReadStream? _blockingStandardOutput;
         private readonly TaskCompletionSource _disposeRelease = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
         private int _exitCode;
 
-        public FakeSidecarProcess(string standardError, bool blockClientOutput = false)
+        public FakeSidecarProcess(
+            string standardError,
+            bool blockClientOutput = false,
+            string standardErrorAtExit = "")
         {
+            _standardErrorPipe = new Pipe(new PipeOptions(
+                pauseWriterThreshold: 1024 * 1024,
+                resumeWriterThreshold: 512 * 1024));
             _clientMessages = new StreamReader(
                 _clientToServer.Reader.AsStream(),
                 Encoding.UTF8,
                 leaveOpen: true);
-            _standardError = new TrackingReadStream(Encoding.UTF8.GetBytes(standardError));
+            _standardError = new TrackingReadStream(_standardErrorPipe.Reader.AsStream());
+            _standardErrorAtExit = standardErrorAtExit;
+            if (standardError.Length > 0)
+            {
+                _standardErrorPipe.Writer
+                    .WriteAsync(Encoding.UTF8.GetBytes(standardError))
+                    .GetAwaiter()
+                    .GetResult();
+            }
+            if (standardErrorAtExit.Length == 0)
+            {
+                _standardErrorPipe.Writer.Complete();
+            }
             _blockingStandardOutput = blockClientOutput ? new BlockingReadStream() : null;
             _standardOutput = _blockingStandardOutput ?? _serverToClient.Reader.AsStream();
         }
@@ -408,6 +507,14 @@ public sealed class SidecarProcessHostTests
 
             HasExited = true;
             _exitCode = exitCode;
+            if (_standardErrorAtExit.Length > 0)
+            {
+                _standardErrorPipe.Writer
+                    .WriteAsync(Encoding.UTF8.GetBytes(_standardErrorAtExit))
+                    .GetAwaiter()
+                    .GetResult();
+            }
+            _standardErrorPipe.Writer.Complete();
             _serverToClient.Writer.Complete();
             _exit.TrySetResult();
             Exited?.Invoke(this, EventArgs.Empty);
@@ -494,7 +601,7 @@ public sealed class SidecarProcessHostTests
             throw new NotSupportedException();
     }
 
-    private sealed class TrackingReadStream(byte[] bytes) : MemoryStream(bytes)
+    private sealed class TrackingReadStream(Stream inner) : Stream
     {
         public TaskCompletionSource ReadStarted { get; } = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
@@ -502,13 +609,13 @@ public sealed class SidecarProcessHostTests
         public override int Read(byte[] buffer, int offset, int count)
         {
             ReadStarted.TrySetResult();
-            return base.Read(buffer, offset, count);
+            return inner.Read(buffer, offset, count);
         }
 
         public override int Read(Span<byte> buffer)
         {
             ReadStarted.TrySetResult();
-            return base.Read(buffer);
+            return inner.Read(buffer);
         }
 
         public override ValueTask<int> ReadAsync(
@@ -516,8 +623,41 @@ public sealed class SidecarProcessHostTests
             CancellationToken cancellationToken = default)
         {
             ReadStarted.TrySetResult();
-            return base.ReadAsync(buffer, cancellationToken);
+            return inner.ReadAsync(buffer, cancellationToken);
         }
+
+        public override bool CanRead => inner.CanRead;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => false;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                inner.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        public override void Flush() => throw new NotSupportedException();
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
     }
 
     private sealed class FakeWslPathConverter(string convertedPath) : IWslPathConverter

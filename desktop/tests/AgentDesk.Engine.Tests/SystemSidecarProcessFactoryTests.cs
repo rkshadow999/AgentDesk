@@ -337,6 +337,31 @@ public sealed class SystemSidecarProcessFactoryTests
         Assert.Equal("clean", output);
     }
 
+    [Fact]
+    public async Task StartAsync_RemovesInheritedRustAndSamplingLogConfiguration()
+    {
+        const string rustLogName = "RUST_LOG";
+        const string samplingLogName = "GROK_LOG_SAMPLING";
+        var previousRustLog = Environment.GetEnvironmentVariable(rustLogName);
+        var previousSamplingLog = Environment.GetEnvironmentVariable(samplingLogName);
+        Environment.SetEnvironmentVariable(rustLogName, "sampling_log=info");
+        Environment.SetEnvironmentVariable(samplingLogName, "1");
+
+        try
+        {
+            var output = await RunCommandAsync(
+                $"if defined {rustLogName} (echo leaked) else " +
+                $"(if defined {samplingLogName} (echo leaked) else (echo clean))");
+
+            Assert.Equal("clean", output);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(rustLogName, previousRustLog);
+            Environment.SetEnvironmentVariable(samplingLogName, previousSamplingLog);
+        }
+    }
+
     private static async Task<string> RunCommandAsync(
         string command,
         IReadOnlyDictionary<string, string?>? environment = null)

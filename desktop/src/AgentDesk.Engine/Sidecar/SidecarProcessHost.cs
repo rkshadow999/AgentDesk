@@ -142,6 +142,7 @@ public sealed class SidecarProcessHost : IAsyncDisposable
                 process.StandardError,
                 options.CaptureStandardError,
                 options.StandardErrorCharacterLimit,
+                options.StandardErrorObserver,
                 _standardErrorShutdown.Token);
             _client = new AcpEngineClient(
                 process.StandardOutput,
@@ -227,8 +228,9 @@ public sealed class SidecarProcessHost : IAsyncDisposable
                 cleanupError);
         }
 
-        _standardErrorShutdown?.Cancel();
         process.Exited -= OnProcessExited;
+        var standardErrorDrainError = await CompleteStandardErrorDrainAsync().ConfigureAwait(false);
+        cleanupError ??= standardErrorDrainError;
 
         var processDisposeTimedOut = false;
         Exception? processDisposeError = null;
@@ -258,25 +260,6 @@ public sealed class SidecarProcessHost : IAsyncDisposable
                 cleanupError ??= exception is TimeoutException
                     ? new TimeoutException(
                         "The ACP client did not stop after the sidecar process exited.",
-                        exception)
-                    : exception;
-            }
-        }
-
-        if (_standardErrorTask is not null)
-        {
-            try
-            {
-                await _standardErrorTask.WaitAsync(_stopTimeout).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-            }
-            catch (Exception exception)
-            {
-                cleanupError ??= exception is TimeoutException
-                    ? new TimeoutException(
-                        "The sidecar standard-error drain did not stop after process exit.",
                         exception)
                     : exception;
             }
@@ -330,6 +313,50 @@ public sealed class SidecarProcessHost : IAsyncDisposable
         return process.HasExited;
     }
 
+    private async Task<Exception?> CompleteStandardErrorDrainAsync()
+    {
+        if (_standardErrorTask is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            await _standardErrorTask.WaitAsync(_stopTimeout).ConfigureAwait(false);
+            return null;
+        }
+        catch (TimeoutException exception)
+        {
+            _standardErrorShutdown?.Cancel();
+            try
+            {
+                await _standardErrorTask.WaitAsync(_stopTimeout).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception cancellationException)
+            {
+                return new TimeoutException(
+                    "The sidecar standard-error drain did not stop after cancellation.",
+                    cancellationException);
+            }
+
+            return new TimeoutException(
+                "The sidecar standard-error stream did not reach EOF after process exit.",
+                exception);
+        }
+        catch (OperationCanceledException) when (
+            _standardErrorShutdown?.IsCancellationRequested == true)
+        {
+            return null;
+        }
+        catch (Exception exception)
+        {
+            return exception;
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
         await _lifecycleLock.WaitAsync().ConfigureAwait(false);
@@ -380,6 +407,7 @@ public sealed class SidecarProcessHost : IAsyncDisposable
         Stream standardError,
         bool capture,
         int characterLimit,
+        Action<ReadOnlyMemory<char>>? observer,
         CancellationToken cancellationToken)
     {
         using var reader = new StreamReader(
@@ -399,6 +427,8 @@ public sealed class SidecarProcessHost : IAsyncDisposable
             {
                 return;
             }
+
+            observer?.Invoke(buffer.AsMemory(0, read));
 
             if (!capture)
             {

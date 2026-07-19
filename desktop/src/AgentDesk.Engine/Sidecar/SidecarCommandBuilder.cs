@@ -56,10 +56,12 @@ public sealed class SidecarCommandBuilder
 
         var agentArguments = BuildAgentArguments(options.ProviderProfile);
 
-        var engineDataPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "AgentDesk",
-            "Engine");
+        var engineDataPath = options.EngineDataPath is null
+            ? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "AgentDesk",
+                "Engine")
+            : NormalizeEngineDataPath(options.EngineDataPath);
         if (options.ExecutionProfile is ExecutionProfile.NativeProtected)
         {
             var nativeEnvironment = BuildEnvironment(
@@ -218,6 +220,12 @@ public sealed class SidecarCommandBuilder
         return arguments;
     }
 
+    private static string NormalizeEngineDataPath(string engineDataPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(engineDataPath);
+        return Path.GetFullPath(engineDataPath);
+    }
+
     private static Dictionary<string, string?> BuildEnvironment(
         string engineDataPath,
         string sandboxProfile,
@@ -235,6 +243,10 @@ public sealed class SidecarCommandBuilder
             ["GROK_FEEDBACK_ENABLED"] = "false",
             ["DISABLE_ERROR_REPORTING"] = "1",
             ["AGENTDESK_SUBAGENT_WORKTREE_MODE"] = "strict",
+            ["RUST_LOG"] = null,
+            ["GROK_LOG_SAMPLING"] = null,
+            ["GROK_DEBUG_LOG"] = null,
+            ["GROK_LOG_FILE"] = null,
             ["XAI_API_KEY"] = null,
             ["GROK_CODE_XAI_API_KEY"] = null,
         };
@@ -259,6 +271,10 @@ public sealed class SidecarCommandBuilder
         {
             "XAI_API_KEY",
             "GROK_CODE_XAI_API_KEY",
+            "RUST_LOG",
+            "GROK_LOG_SAMPLING",
+            "GROK_DEBUG_LOG",
+            "GROK_LOG_FILE",
         };
         var entries = string.IsNullOrWhiteSpace(inheritedValue)
             ? []

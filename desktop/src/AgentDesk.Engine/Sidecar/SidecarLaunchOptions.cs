@@ -9,6 +9,8 @@ public sealed record SidecarLaunchOptions(
 {
     public string? EnginePath { get; init; }
 
+    public string? EngineDataPath { get; init; }
+
     public string? ApiKey { get; init; }
 
     public ProviderProfile? ProviderProfile { get; init; }
@@ -20,4 +22,6 @@ public sealed record SidecarLaunchOptions(
     public bool CaptureStandardError { get; init; }
 
     public int StandardErrorCharacterLimit { get; init; } = 8 * 1024;
+
+    public Action<ReadOnlyMemory<char>>? StandardErrorObserver { get; init; }
 }

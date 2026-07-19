@@ -26,6 +26,7 @@ public sealed class SystemSidecarProcessFactory : ISidecarProcessFactory
         "GOOGLE_APPLICATION_CREDENTIALS",
         "GPG_AGENT_INFO",
         "KUBECONFIG",
+        "RUST_LOG",
         "SSH_AUTH_SOCK",
     };
 

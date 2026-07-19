@@ -78,6 +78,52 @@ public sealed class SidecarCommandBuilderTests
     }
 
     [Fact]
+    public async Task BuildAsync_ConfiguredEngineDataPathOverridesTheDefaultLocation()
+    {
+        using var workspace = new TemporaryDirectory();
+        using var engineData = new TemporaryDirectory();
+        var enginePath = workspace.CreateFile("agentdesk-engine.exe");
+        var options = new SidecarLaunchOptions(
+            workspace.Path,
+            ExecutionProfile.NativeProtected)
+        {
+            EnginePath = enginePath,
+            EngineDataPath = engineData.Path,
+        };
+
+        var command = await new SidecarCommandBuilder(new FakeWslPathConverter())
+            .BuildAsync(options);
+
+        Assert.Equal(engineData.Path, command.Environment["GROK_HOME"]);
+        Assert.NotEqual(
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "AgentDesk",
+                "Engine"),
+            command.Environment["GROK_HOME"]);
+    }
+
+    [Fact]
+    public async Task BuildAsync_ClearsInheritedDiagnosticLoggingVariables()
+    {
+        using var workspace = new TemporaryDirectory();
+        var enginePath = workspace.CreateFile("agentdesk-engine.exe");
+
+        var command = await new SidecarCommandBuilder(new FakeWslPathConverter())
+            .BuildAsync(new SidecarLaunchOptions(
+                workspace.Path,
+                ExecutionProfile.NativeProtected)
+            {
+                EnginePath = enginePath,
+            });
+
+        Assert.Null(command.Environment["RUST_LOG"]);
+        Assert.Null(command.Environment["GROK_LOG_SAMPLING"]);
+        Assert.Null(command.Environment["GROK_DEBUG_LOG"]);
+        Assert.Null(command.Environment["GROK_LOG_FILE"]);
+    }
+
+    [Fact]
     public async Task BuildAsync_NativeProtectedPassesOpenAiCompatibleProviderAsSeparateArguments()
     {
         using var workspace = new TemporaryDirectory();
@@ -290,6 +336,10 @@ public sealed class SidecarCommandBuilderTests
             "AGENTDESK_SUBAGENT_WORKTREE_MODE",
             wslEnvironment,
             StringComparison.Ordinal);
+        Assert.DoesNotContain("RUST_LOG", wslEnvironment, StringComparison.Ordinal);
+        Assert.DoesNotContain("GROK_LOG_SAMPLING", wslEnvironment, StringComparison.Ordinal);
+        Assert.DoesNotContain("GROK_DEBUG_LOG", wslEnvironment, StringComparison.Ordinal);
+        Assert.DoesNotContain("GROK_LOG_FILE", wslEnvironment, StringComparison.Ordinal);
         Assert.Equal("strict", command.Environment["AGENTDESK_SUBAGENT_WORKTREE_MODE"]);
         Assert.DoesNotContain("xai-secret", command.Arguments);
         Assert.DoesNotContain(

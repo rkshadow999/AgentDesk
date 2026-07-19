@@ -11,15 +11,42 @@ internal static class ProviderSmoke
 {
     public static async Task<int> RunAsync()
     {
+        try
+        {
+            return await WithTemporaryEngineDataDirectoryAsync(RunCoreAsync);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine(JsonSerializer.Serialize(new
+            {
+                success = false,
+                stage = "cleanup",
+                failureCode = "cleanup_failed",
+                errorType = exception.GetType().Name,
+                diagnosticScanComplete = false,
+                credentialInDiagnostics = false,
+            }));
+            return 1;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("GROK_THIRD_PARTY_API_KEY", null);
+        }
+    }
+
+    private static async Task<int> RunCoreAsync(string engineDataPath)
+    {
         var stage = "configuration";
         var apiKey = string.Empty;
+        StreamingSecretDetector? secretDetector = null;
         await using var host = new SidecarProcessHost();
 
         try
         {
-            var settings = SmokeSettings.Load();
             apiKey = RequiredEnvironmentVariable("GROK_THIRD_PARTY_API_KEY");
             Environment.SetEnvironmentVariable("GROK_THIRD_PARTY_API_KEY", null);
+            secretDetector = new StreamingSecretDetector(apiKey);
+            var settings = SmokeSettings.Load();
 
             var profile = new ProviderProfile(
                 settings.BaseUrl,
@@ -36,12 +63,13 @@ internal static class ProviderSmoke
                 ExecutionProfile.NativeProtected)
             {
                 EnginePath = settings.EnginePath,
+                EngineDataPath = engineDataPath,
                 ApiKey = apiKey,
                 ProviderProfile = profile,
                 StartTimeout = TimeSpan.FromSeconds(20),
                 StopTimeout = TimeSpan.FromSeconds(15),
-                CaptureStandardError = true,
-                StandardErrorCharacterLimit = 64 * 1024,
+                CaptureStandardError = false,
+                StandardErrorObserver = secretDetector.Observe,
             };
 
             stage = "sidecar-start";
@@ -128,11 +156,15 @@ internal static class ProviderSmoke
             cancellationWatch.Stop();
 
             stage = "shutdown";
-            await host.StopAsync();
-            var standardErrorContainsCredential = host.CapturedStandardError.Contains(
-                apiKey,
-                StringComparison.Ordinal);
-            if (standardErrorContainsCredential)
+            var diagnostics = await CompleteDiagnosticScanAsync(
+                () => host.StopAsync(),
+                secretDetector);
+            if (!diagnostics.ScanCompleted)
+            {
+                throw new InvalidDataException(
+                    "The sidecar diagnostic stream did not finish draining.");
+            }
+            if (diagnostics.SecretObserved)
             {
                 throw new InvalidDataException("The sidecar diagnostic stream contained a credential.");
             }
@@ -151,28 +183,71 @@ internal static class ProviderSmoke
                 cancellationStreamObserved = Volatile.Read(ref cancellationStreamObserved) != 0,
                 cancellationObserved = true,
                 cleanShutdown = true,
+                diagnosticScanComplete = true,
                 credentialInDiagnostics = false,
             }));
             return 0;
         }
         catch (Exception exception)
         {
-            var credentialInDiagnostics = !string.IsNullOrEmpty(apiKey) &&
-                host.CapturedStandardError.Contains(apiKey, StringComparison.Ordinal);
+            var diagnostics = await CompleteDiagnosticScanAsync(
+                () => host.DisposeAsync().AsTask(),
+                secretDetector);
             Console.Error.WriteLine(JsonSerializer.Serialize(new
             {
                 success = false,
                 stage,
                 failureCode = FailureCode(stage, exception),
                 errorType = exception.GetType().Name,
-                credentialInDiagnostics,
+                diagnosticScanComplete = diagnostics.ScanCompleted,
+                credentialInDiagnostics = diagnostics.SecretObserved,
             }));
             return 1;
         }
         finally
         {
+            secretDetector?.Dispose();
             apiKey = string.Empty;
         }
+    }
+
+    internal static async Task<int> WithTemporaryEngineDataDirectoryAsync(
+        Func<string, Task<int>> action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        var directory = Directory.CreateTempSubdirectory("agentdesk-provider-smoke-");
+        try
+        {
+            return await action(directory.FullName).ConfigureAwait(false);
+        }
+        finally
+        {
+            directory.Refresh();
+            if (directory.Exists)
+            {
+                directory.Delete(recursive: true);
+            }
+        }
+    }
+
+    internal static async Task<DiagnosticScanResult> CompleteDiagnosticScanAsync(
+        Func<Task> drainAsync,
+        StreamingSecretDetector? detector)
+    {
+        ArgumentNullException.ThrowIfNull(drainAsync);
+        var completed = true;
+        try
+        {
+            await drainAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            completed = false;
+        }
+
+        return new DiagnosticScanResult(
+            completed,
+            detector?.SecretObserved ?? false);
     }
 
     internal static async Task<PromptResult> ObserveCancellationAsync(
@@ -314,6 +389,10 @@ internal static class ProviderSmoke
         return value;
     }
 
+    internal sealed record DiagnosticScanResult(
+        bool ScanCompleted,
+        bool SecretObserved);
+
     private sealed record SmokeSettings(
         string BaseUrl,
         string Model,
@@ -363,5 +442,94 @@ internal static class ProviderSmoke
                 workspacePath,
                 timeout);
         }
+    }
+}
+
+internal sealed class StreamingSecretDetector : IDisposable
+{
+    private readonly object _gate = new();
+    private string _secret;
+    private int[] _prefixTable;
+    private int _matchedCharacters;
+    private int _secretObserved;
+
+    public StreamingSecretDetector(string secret)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(secret);
+        _secret = secret;
+        _prefixTable = BuildPrefixTable(secret);
+    }
+
+    public bool SecretObserved => Volatile.Read(ref _secretObserved) != 0;
+
+    public int RetainedDiagnosticCharacterCount => 0;
+
+    public void Observe(ReadOnlyMemory<char> chunk)
+    {
+        if (SecretObserved || chunk.IsEmpty)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (SecretObserved || _secret.Length == 0)
+            {
+                return;
+            }
+
+            foreach (var value in chunk.Span)
+            {
+                while (_matchedCharacters > 0 && value != _secret[_matchedCharacters])
+                {
+                    _matchedCharacters = _prefixTable[_matchedCharacters - 1];
+                }
+
+                if (value == _secret[_matchedCharacters])
+                {
+                    _matchedCharacters++;
+                }
+
+                if (_matchedCharacters == _secret.Length)
+                {
+                    Volatile.Write(ref _secretObserved, 1);
+                    _matchedCharacters = _prefixTable[_matchedCharacters - 1];
+                    return;
+                }
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            _secret = string.Empty;
+            Array.Clear(_prefixTable);
+            _prefixTable = [];
+            _matchedCharacters = 0;
+        }
+    }
+
+    private static int[] BuildPrefixTable(string value)
+    {
+        var table = new int[value.Length];
+        var matched = 0;
+        for (var index = 1; index < value.Length; index++)
+        {
+            while (matched > 0 && value[index] != value[matched])
+            {
+                matched = table[matched - 1];
+            }
+
+            if (value[index] == value[matched])
+            {
+                matched++;
+            }
+
+            table[index] = matched;
+        }
+
+        return table;
     }
 }
