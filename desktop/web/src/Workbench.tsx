@@ -602,6 +602,10 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
       updateSessionListStatus("loaded");
       return;
     }
+    if (!workspaceReady) {
+      firstSessionQueryRef.current = false;
+      return;
+    }
     if (firstSessionQueryRef.current) {
       firstSessionQueryRef.current = false;
       requestSessionList();
@@ -839,13 +843,16 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
         }
         break;
       case "workspace/selected":
-        if (event.workspaceGeneration < workspaceGenerationRef.current) {
+        const sameWorkspace = workspacePathRef.current.length > 0 &&
+          sameWorkspacePath(event.path, workspacePathRef.current);
+        if (event.workspaceGeneration < workspaceGenerationRef.current ||
+            (event.workspaceGeneration === workspaceGenerationRef.current && sameWorkspace)) {
           break;
         }
         const workspaceGenerationChanged =
           event.workspaceGeneration > workspaceGenerationRef.current;
-        const workspaceContextChanged = workspacePathRef.current.length > 0 &&
-          !sameWorkspacePath(event.path, workspacePathRef.current);
+        const hadWorkspace = workspacePathRef.current.length > 0;
+        const workspaceContextChanged = hadWorkspace && !sameWorkspace;
         workspaceGenerationRef.current = event.workspaceGeneration;
         setWorkspaceGeneration(event.workspaceGeneration);
         workspacePathRef.current = event.path;
@@ -882,8 +889,12 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
           setImagePrompts(false);
           sessionModesRef.current = ["default"];
           setPlanAvailable(undefined);
-          requestSessionList();
         }
+        requestSessionList(
+          archivedSessionsViewRef.current,
+          sessionQueryRef.current,
+          hadWorkspace && !workspaceContextChanged
+        );
         if (bridge.available) {
           bridge.send({
             type: "runtime/commands/list",
@@ -2132,12 +2143,18 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
 
   function requestSessionList(
     archived = archivedSessionsViewRef.current,
-    query = sessionQueryRef.current
+    query = sessionQueryRef.current,
+    preserveSessions = false
   ) {
+    if (!workspacePathRef.current) {
+      return;
+    }
     const requestId = createMaintenanceRequestId();
     sessionListRequestRef.current = { requestId, mode: "replace" };
     setLoadingMoreSessions(false);
-    setSessions([]);
+    if (!preserveSessions) {
+      setSessions([]);
+    }
     setNextSessionCursor(undefined);
     setSessionListError("");
     updateSessionListStatus("loading");
@@ -3245,7 +3262,20 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
           <div className={sessionListStatus === "loaded" && sessions.length > 0
             ? "session-list-shell"
             : "session-list"}>
-            {sessionListStatus === "loading" && (
+            {!workspaceReady && (
+              <>
+                <p className="session-empty">{t("workspaceNotSelected")}</p>
+                <button
+                  type="button"
+                  className="load-more-sessions"
+                  onClick={selectWorkspace}
+                >
+                  <FolderKanban size={13} />
+                  <span>{t("selectWorkspace")}</span>
+                </button>
+              </>
+            )}
+            {workspaceReady && sessionListStatus === "loading" && (
               <div
                 className="session-list-state"
                 role={activeSurface === "conversation" ? "status" : undefined}
@@ -3254,7 +3284,7 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
                 <span>{t("loadingSessions")}</span>
               </div>
             )}
-            {sessionListStatus === "error" && (
+            {workspaceReady && sessionListStatus === "error" && (
               <div className="session-list-error" role="alert">
                 <span>{sessionListError || t("sessionListError")}</span>
                 <button type="button" onClick={() => requestSessionList()}>
@@ -3263,7 +3293,7 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
                 </button>
               </div>
             )}
-            {sessionListStatus === "loaded" && sessions.length === 0 && (
+            {workspaceReady && sessionListStatus === "loaded" && sessions.length === 0 && (
               <>
                 <p className="session-empty">
                   {t(archivedSessionsView ? "noArchivedSessions" : "noSessions")}
@@ -3271,7 +3301,7 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
                 {loadMoreSessionsButton}
               </>
             )}
-            {sessionListStatus === "loaded" && sessions.length > 0 && (
+            {workspaceReady && sessionListStatus === "loaded" && sessions.length > 0 && (
               <VirtualizedList
                 className="session-list"
                 items={sessions}

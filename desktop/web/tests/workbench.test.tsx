@@ -3227,6 +3227,74 @@ describe("Workbench", () => {
     ]);
   });
 
+  it("offers workspace selection without querying sessions when no workspace is available", () => {
+    const bridge = new RecordingBridge(null);
+    render(<Workbench bridge={bridge} />);
+
+    expect(commandsOfType(bridge, "session/list")).toEqual([]);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "选择工作区" }));
+
+    expect(bridge.commands).toContainEqual({ type: "workspace/select" });
+  });
+
+  it("queries sessions once when the first workspace becomes available", () => {
+    const bridge = new RecordingBridge(null);
+    render(<Workbench bridge={bridge} />);
+
+    act(() => bridge.emit({
+      type: "workspace/selected",
+      path: "C:\\workspace",
+      workspaceGeneration: 1
+    }));
+
+    expect(sessionListCommandPayloads(bridge)).toEqual([
+      { type: "session/list", query: "", limit: 50 }
+    ]);
+  });
+
+  it("queries sessions only once more when switching workspaces", () => {
+    const bridge = new RecordingBridge();
+    render(<Workbench bridge={bridge} />);
+
+    expect(sessionListCommandPayloads(bridge)).toHaveLength(1);
+
+    act(() => bridge.emit({
+      type: "workspace/selected",
+      path: "D:\\second-workspace",
+      workspaceGeneration: 2
+    }));
+
+    expect(sessionListCommandPayloads(bridge)).toEqual([
+      { type: "session/list", query: "", limit: 50 },
+      { type: "session/list", query: "", limit: 50 }
+    ]);
+  });
+
+  it("ignores duplicate workspace snapshots from multiple webviews", () => {
+    const bridge = new RecordingBridge();
+    render(<Workbench bridge={bridge} />);
+
+    act(() => {
+      bridge.emit({
+        type: "workspace/selected",
+        path: "c:\\WORKSPACE",
+        workspaceGeneration: 1
+      });
+      bridge.emit({
+        type: "workspace/selected",
+        path: "C:\\workspace",
+        workspaceGeneration: 1
+      });
+    });
+
+    expect(sessionListCommandPayloads(bridge)).toEqual([
+      { type: "session/list", query: "", limit: 50 }
+    ]);
+  });
+
   it("waits for the initial workspace snapshot before enabling prompts", () => {
     const bridge = new RecordingBridge(null);
     render(<Workbench bridge={bridge} />);

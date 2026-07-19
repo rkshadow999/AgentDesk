@@ -1209,10 +1209,12 @@ public sealed partial class AgentDeskHostController :
             {
                 if (_workspacePath is null)
                 {
-                    throw new InvalidOperationException(WorkspaceRequiredMessage);
+                    listEvent = new SessionListChangedWebEvent(
+                        [],
+                        null,
+                        command.RequestId);
                 }
-
-                if (command.Archived)
+                else if (command.Archived)
                 {
                     var offset = ParseLocalSessionCursor(command.Cursor);
                     var sessions = await _sessionIndexStore

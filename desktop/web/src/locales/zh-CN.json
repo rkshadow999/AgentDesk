@@ -244,6 +244,7 @@
   "nativeShort": "本机",
   "wslUnavailable": "当前桌面宿主未提供 WSL2 严格模式",
   "workspaceNotSelected": "未选择工作区",
+  "selectWorkspace": "选择工作区",
   "localWorkspace": "本地工作区",
   "previewContext": "上下文 18%",
   "credentialSaved": "密钥已保存",

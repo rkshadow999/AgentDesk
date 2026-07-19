@@ -2118,6 +2118,27 @@ public sealed class AgentDeskHostControllerTests
     }
 
     [Fact]
+    public async Task SessionList_WithoutWorkspacePublishesCorrelatedEmptyPageWithoutStartingEngine()
+    {
+        var fixture = new ControllerFixture();
+        fixture.Factory.EnqueueEngine("C:\\unused-workspace", "unused-session");
+        await using var controller = fixture.CreateController(new AgentDeskHostOptions());
+        const string requestId = "11111111-1111-4111-8111-111111111111";
+
+        await controller.HandleAsync(
+            new SessionListWebCommand(requestId, string.Empty, null, 50));
+
+        var events = fixture.Events.Snapshot();
+        var listEvent = Assert.Single(events.OfType<SessionListChangedWebEvent>());
+        Assert.Equal(requestId, listEvent.RequestId);
+        Assert.Empty(listEvent.Sessions);
+        Assert.Null(listEvent.NextCursor);
+        Assert.DoesNotContain(events, item => item is SessionListErrorWebEvent);
+        Assert.Empty(fixture.Factory.Hosts);
+        Assert.Empty(fixture.Factory.Launches);
+    }
+
+    [Fact]
     public async Task SessionList_StartsTheEngineAndPublishesTheAuthoritativePage()
     {
         var fixture = new ControllerFixture();

@@ -244,6 +244,7 @@
   "nativeShort": "Native",
   "wslUnavailable": "This desktop host does not provide WSL2 strict mode",
   "workspaceNotSelected": "No workspace selected",
+  "selectWorkspace": "Select workspace",
   "localWorkspace": "Local workspace",
   "previewContext": "Context 18%",
   "credentialSaved": "Credential saved",
