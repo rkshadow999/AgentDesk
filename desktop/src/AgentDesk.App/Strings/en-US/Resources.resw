@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms</value></resheader>
+  <data name="AppTitle.Text" xml:space="preserve"><value>AgentDesk</value></data>
+  <data name="AppEdition.Text" xml:space="preserve"><value>Local workbench</value></data>
+  <data name="LoadingStatus.Text" xml:space="preserve"><value>Starting</value></data>
+  <data name="LoadingWorkbench.Text" xml:space="preserve"><value>Loading the desktop interface…</value></data>
+  <data name="WorkbenchUnavailable.Text" xml:space="preserve"><value>Desktop interface unavailable</value></data>
+  <data name="EngineNotConnected.Text" xml:space="preserve"><value>Engine disconnected</value></data>
+  <data name="NativeProtected.Text" xml:space="preserve"><value>Native compatibility (not sandboxed)</value></data>
+  <data name="WorkbenchAutomationName" xml:space="preserve"><value>AgentDesk workbench</value></data>
+  <data name="InspectorAutomationName" xml:space="preserve"><value>AgentDesk inspector</value></data>
+  <data name="Reload" xml:space="preserve"><value>Reload</value></data>
+  <data name="WorkspaceNotSelected" xml:space="preserve"><value>No workspace selected</value></data>
+  <data name="DesktopStartFailed" xml:space="preserve"><value>Could not start the desktop interface: {0}</value></data>
+  <data name="DesktopNavigationFailed" xml:space="preserve"><value>Desktop interface navigation failed: {0}</value></data>
+  <data name="InterfaceReady" xml:space="preserve"><value>Interface ready</value></data>
+  <data name="UnsupportedDesktopMessage" xml:space="preserve"><value>The desktop message format is not supported.</value></data>
+  <data name="DesktopCommandFailed" xml:space="preserve"><value>The desktop command failed.</value></data>
+  <data name="SelectWorkspace" xml:space="preserve"><value>Select workspace</value></data>
+  <data name="EngineConnected" xml:space="preserve"><value>Engine connected</value></data>
+  <data name="EngineStarting" xml:space="preserve"><value>Starting engine</value></data>
+  <data name="TaskRunning" xml:space="preserve"><value>Task running</value></data>
+  <data name="WaitingForTask" xml:space="preserve"><value>Waiting for a task</value></data>
+  <data name="EngineDisconnected" xml:space="preserve"><value>Engine disconnected</value></data>
+  <data name="EngineUnavailable" xml:space="preserve"><value>Engine unavailable</value></data>
+  <data name="EngineStopped" xml:space="preserve"><value>Engine stopped</value></data>
+  <data name="EngineError" xml:space="preserve"><value>Engine error</value></data>
+  <data name="InterfaceLoading" xml:space="preserve"><value>Loading interface</value></data>
+  <data name="ActionRequired" xml:space="preserve"><value>Action required</value></data>
+  <data name="InterfaceUnavailable" xml:space="preserve"><value>Interface unavailable</value></data>
+  <data name="LocalWorkbench" xml:space="preserve"><value>Local workbench</value></data>
+  <data name="EngineClosingSafely" xml:space="preserve"><value>Safely shutting down the engine</value></data>
+  <data name="EngineClosing" xml:space="preserve"><value>Shutting down engine</value></data>
+  <data name="EngineShutdownFailedBody" xml:space="preserve"><value>The local engine could not be stopped safely. The window will remain open; close it again to retry.</value></data>
+  <data name="ShutdownFailedRetry" xml:space="preserve"><value>Shutdown failed; retry</value></data>
+  <data name="EngineCleanupFailed" xml:space="preserve"><value>Engine cleanup failed</value></data>
+  <data name="SessionTransferFiles" xml:space="preserve"><value>AgentDesk session files</value></data>
+  <data name="BackupArchiveFiles" xml:space="preserve"><value>AgentDesk backup files</value></data>
+  <data name="RestoringBackup" xml:space="preserve"><value>Safely restoring local data</value></data>
+  <data name="ApplicationRestartFailed" xml:space="preserve"><value>The data operation finished, but AgentDesk could not restart automatically. Reopen the app manually.</value></data>
+  <data name="ProviderCredentialTitle" xml:space="preserve"><value>Set model provider credential</value></data>
+  <data name="ProviderCredentialPrompt" xml:space="preserve"><value>API Key (enter it only in this native Windows dialog)</value></data>
+  <data name="ProviderCredentialInvalid" xml:space="preserve"><value>Enter a non-empty API Key without spaces.</value></data>
+  <data name="CloudAccessTokenTitle" xml:space="preserve"><value>Connect self-hosted cloud</value></data>
+  <data name="CloudAccessTokenPrompt" xml:space="preserve"><value>Access token</value></data>
+  <data name="CloudAccessTokenInvalid" xml:space="preserve"><value>Enter a non-empty token without spaces.</value></data>
+  <data name="CloudPairingPassphraseTitle" xml:space="preserve"><value>Recovery key pairing</value></data>
+  <data name="CloudPairingPassphrasePrompt" xml:space="preserve"><value>Pairing passphrase</value></data>
+  <data name="CloudPairingPassphraseInvalid" xml:space="preserve"><value>Use a passphrase between 16 and 1,024 characters.</value></data>
+  <data name="CloudPairingFiles" xml:space="preserve"><value>AgentDesk recovery key pairing packages</value></data>
+  <data name="CloudConfirm" xml:space="preserve"><value>Continue</value></data>
+  <data name="CloudCancel" xml:space="preserve"><value>Cancel</value></data>
+  <data name="ExtensionApprovalTitle" xml:space="preserve"><value>Allow extension operation?</value></data>
+  <data name="ExtensionApprovalBody" xml:space="preserve"><value>Type: {0}&#x0A;Action: {1}&#x0A;Target: {2}&#x0A;&#x0A;This operation changes local extension configuration or loads code. Allow it only when you initiated the request and trust the target.</value></data>
+  <data name="ExtensionApprovalAllowOnce" xml:space="preserve"><value>Allow once</value></data>
+  <data name="ExtensionApprovalDeny" xml:space="preserve"><value>Deny</value></data>
+  <data name="ExtensionScopeMcp" xml:space="preserve"><value>MCP server</value></data>
+  <data name="ExtensionScopeSkills" xml:space="preserve"><value>Skill</value></data>
+  <data name="ExtensionScopeHooks" xml:space="preserve"><value>Hook</value></data>
+  <data name="ExtensionScopePlugins" xml:space="preserve"><value>Plugin</value></data>
+  <data name="ExtensionScopeMarketplace" xml:space="preserve"><value>Marketplace</value></data>
+  <data name="ExtensionActionToggle" xml:space="preserve"><value>Toggle enabled state</value></data>
+  <data name="ExtensionActionConfigureStdio" xml:space="preserve"><value>Configure stdio server</value></data>
+  <data name="ExtensionActionConfigureHttp" xml:space="preserve"><value>Configure HTTP server</value></data>
+  <data name="ExtensionActionDelete" xml:space="preserve"><value>Delete</value></data>
+  <data name="ExtensionActionAddPath" xml:space="preserve"><value>Add path</value></data>
+  <data name="ExtensionActionRemovePath" xml:space="preserve"><value>Remove path</value></data>
+  <data name="ExtensionActionReset" xml:space="preserve"><value>Reset</value></data>
+  <data name="ExtensionActionReload" xml:space="preserve"><value>Reload</value></data>
+  <data name="ExtensionActionTrust" xml:space="preserve"><value>Trust current project</value></data>
+  <data name="ExtensionActionUntrust" xml:space="preserve"><value>Untrust current project</value></data>
+  <data name="ExtensionActionAdd" xml:space="preserve"><value>Add</value></data>
+  <data name="ExtensionActionRemove" xml:space="preserve"><value>Remove</value></data>
+  <data name="ExtensionActionEnable" xml:space="preserve"><value>Enable</value></data>
+  <data name="ExtensionActionDisable" xml:space="preserve"><value>Disable</value></data>
+  <data name="ExtensionActionToggleSource" xml:space="preserve"><value>Toggle source state</value></data>
+  <data name="ExtensionActionInstall" xml:space="preserve"><value>Install</value></data>
+  <data name="ExtensionActionUpdate" xml:space="preserve"><value>Update</value></data>
+  <data name="ExtensionActionUninstall" xml:space="preserve"><value>Uninstall</value></data>
+  <data name="WindowsAutomationApprovalTitle" xml:space="preserve"><value>Allow Windows UI Automation?</value></data>
+  <data name="WindowsAutomationApprovalBody" xml:space="preserve"><value>Action: {0}&#x0A;Process ID: {1}&#x0A;Target: {2}&#x0A;Value length: {3} characters&#x0A;&#x0A;This native Windows action can control another application. Allow it only when you initiated the request and trust the target.</value></data>
+  <data name="WindowsAutomationActionFocus" xml:space="preserve"><value>Focus window</value></data>
+  <data name="WindowsAutomationActionInvoke" xml:space="preserve"><value>Invoke control</value></data>
+  <data name="WindowsAutomationActionSetValue" xml:space="preserve"><value>Set control value</value></data>
+  <data name="WindowsAutomationAllowOnce" xml:space="preserve"><value>Allow once</value></data>
+  <data name="WindowsAutomationDeny" xml:space="preserve"><value>Deny</value></data>
+</root>

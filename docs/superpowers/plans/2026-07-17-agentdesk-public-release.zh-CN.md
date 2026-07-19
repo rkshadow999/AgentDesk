@@ -4,7 +4,7 @@
 
 > **面向 AI 代理的工作者：** 必需子技能：使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans` 逐任务实施本计划。使用下方复选框跟踪进度。
 
-**目标：** 将已验证的 AgentDesk Alpha 合规发布为 `rkshadow/AgentDesk` 双语公开仓库。
+**目标：** 将已验证的 AgentDesk Alpha 合规发布为 `rkshadow999/AgentDesk` 双语公开仓库。
 
 **架构：** 保留完整 `xai-org/grok-build` 历史与许可证，只在 AgentDesk 自有入口替换上游产品身份；根据源码元数据生成桌面依赖声明，并在 CI 中用 PowerShell 校验器执行发布契约。上游 remote 改为只读，新社区仓库成为 `origin`。
 
@@ -98,7 +98,7 @@ README 必须包含当前 Alpha 截图、架构、当前功能、精确构建入
 贡献指南接受 Issue 与 PR，要求定向测试、保留上游声明并避免生成物/二进制噪音。安全说明把私密报告指向：
 
 ```text
-https://github.com/rkshadow/AgentDesk/security/advisories/new
+https://github.com/rkshadow999/AgentDesk/security/advisories/new
 ```
 
 - [ ] **步骤 4：增加中英文 Contributor Covenant 2.1**
@@ -339,7 +339,7 @@ gh auth status
 - [ ] **步骤 2：创建空公开仓库**
 
 ```powershell
-gh repo create rkshadow/AgentDesk --public --description "Independent bilingual Windows 11 desktop client for the grok-build agent runtime"
+gh repo create rkshadow999/AgentDesk --public --description "Independent bilingual Windows 11 desktop client for the grok-build agent runtime"
 ```
 
 - [ ] **步骤 3：安全重接 remote**
@@ -347,7 +347,7 @@ gh repo create rkshadow/AgentDesk --public --description "Independent bilingual 
 ```powershell
 git remote rename origin upstream
 git remote set-url --push upstream DISABLED
-git remote add origin https://github.com/rkshadow/AgentDesk.git
+git remote add origin https://github.com/rkshadow999/AgentDesk.git
 git branch -M main
 git push -u origin main
 ```
@@ -355,9 +355,9 @@ git push -u origin main
 - [ ] **步骤 4：配置社区仓库功能**
 
 ```powershell
-gh repo edit rkshadow/AgentDesk --enable-issues --enable-discussions --enable-delete-branch --disable-wiki
-gh api --method PUT repos/rkshadow/AgentDesk/private-vulnerability-reporting
-gh repo edit rkshadow/AgentDesk --add-topic windows-11,winui3,dotnet,rust,acp,ai-agent,chinese
+gh repo edit rkshadow999/AgentDesk --enable-issues --enable-discussions --enable-delete-branch --disable-wiki
+gh api --method PUT repos/rkshadow999/AgentDesk/private-vulnerability-reporting
+gh repo edit rkshadow999/AgentDesk --add-topic windows-11,winui3,dotnet,rust,acp,ai-agent,chinese
 ```
 
 - [ ] **步骤 5：首次推送后保护 main**
@@ -367,8 +367,8 @@ gh repo edit rkshadow/AgentDesk --add-topic windows-11,winui3,dotnet,rust,acp,ai
 - [ ] **步骤 6：验证公开仓库**
 
 ```powershell
-gh repo view rkshadow/AgentDesk --json nameWithOwner,isPrivate,defaultBranchRef,url
-gh run list --repo rkshadow/AgentDesk --limit 5
+gh repo view rkshadow999/AgentDesk --json nameWithOwner,isPrivate,defaultBranchRef,url
+gh run list --repo rkshadow999/AgentDesk --limit 5
 git remote -v
 ```
 

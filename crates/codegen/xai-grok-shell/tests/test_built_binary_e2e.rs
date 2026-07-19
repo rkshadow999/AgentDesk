@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Built-binary end-to-end tests for the grok (xai-grok-pager) binary.
 //!
 //! These tests verify that the built grok binary works end-to-end against a mock
@@ -997,6 +998,170 @@ async fn test_stdio_full_session_lifecycle() {
             server.request_log_summary(),
             stderr_tail(&client.stderr(), 1200)
         );
+    })
+    .await;
+}
+
+/// Windows release gate for the exact AgentDesk sidecar lifecycle.
+///
+/// Unlike the generic lifecycle test, this also requires stdin shutdown to
+/// terminate the real process normally instead of relying on kill-on-drop.
+#[cfg(windows)]
+#[tokio::test]
+#[ignore] // requires the pre-built Windows release sidecar from CI
+async fn test_windows_agentdesk_stdio_lifecycle_and_clean_shutdown() {
+    with_local_set(|| async {
+        let server = MockInferenceServer::start()
+            .await
+            .expect("start mock server");
+        let workdir = git_workdir();
+        let client = GrokStdioClient::spawn(&server, workdir.path()).await;
+
+        let init_resp = client.initialize_with_timeout().await;
+        assert!(
+            init_resp
+                .auth_methods
+                .iter()
+                .any(|method| &*method.id().0 == "xai.api_key"),
+            "AgentDesk requires the xai.api_key ACP authentication method"
+        );
+
+        let session_id = client.create_session_with_timeout(workdir.path()).await;
+        assert!(!session_id.0.is_empty(), "session ID should be non-empty");
+
+        let result = client
+            .prompt_with_timeout(&session_id, "reply with ok")
+            .await;
+        assert!(
+            result.is_ok(),
+            "prompt failed: {:?}\nrequest log:\n{}\nstderr:\n{}",
+            result.err(),
+            server.request_log_summary(),
+            stderr_tail(&client.stderr(), 1200)
+        );
+        assert!(
+            server.request_count() > 0,
+            "the local mock server received no inference request"
+        );
+
+        let exit_status = client.shutdown_with_timeout().await;
+        assert!(
+            exit_status.success(),
+            "sidecar did not exit cleanly after ACP stdin closed: {exit_status:?}"
+        );
+    })
+    .await;
+}
+
+/// Release gate for the exact desktop-owned custom-provider boundary.
+///
+/// The desktop sends the credential over the private ACP pipe before
+/// `initialize`; it must replace inherited test credentials without touching
+/// disk, and the AgentDesk provider override must avoid remote model/config
+/// discovery entirely.
+#[cfg(windows)]
+#[tokio::test]
+#[ignore] // requires the pre-built Windows release sidecar from CI
+async fn test_windows_agentdesk_custom_provider_backends_use_memory_only_credential() {
+    with_local_set(|| async {
+        const API_KEY: &str = "agentdesk-memory-only-e2e-secret";
+        for (backend, inference_path) in [
+            ("chat_completions", "/v1/chat/completions"),
+            ("responses", "/v1/responses"),
+        ] {
+            let server = MockInferenceServer::start_with_required_auth(
+                vec![MockModelEntry::new("grok-4.5").with_api_backend(backend)],
+                API_KEY,
+            )
+            .await
+            .expect("start authenticated mock server");
+            server.set_response("ok");
+
+            let workdir = git_workdir();
+            let home = tempfile::TempDir::new().expect("create isolated AgentDesk home");
+            let base_url = server.url();
+            let client = GrokStdioClient::spawn_agentdesk(
+                &server,
+                workdir.path(),
+                home,
+                &[
+                    "--no-leader",
+                    "--model",
+                    "grok-4.5",
+                    "--agentdesk-openai-base-url",
+                    base_url.as_str(),
+                    "--agentdesk-openai-backend",
+                    backend,
+                ],
+            )
+            .await;
+
+            client
+                .bridge_agentdesk_credential_with_timeout(API_KEY)
+                .await;
+            let initialize = client.initialize_with_timeout().await;
+            assert!(
+                initialize
+                    .auth_methods
+                    .iter()
+                    .any(|method| &*method.id().0 == "xai.api_key"),
+                "the memory credential must advertise xai.api_key"
+            );
+
+            let session_id = client.create_session_with_timeout(workdir.path()).await;
+            let result = client
+                .prompt_with_timeout(&session_id, "reply with ok")
+                .await;
+            assert!(
+                result.is_ok(),
+                "{backend} custom-provider prompt failed: {:?}\nrequest log:\n{}\nstderr:\n{}",
+                result.err(),
+                server.request_log_summary(),
+                stderr_tail(&client.stderr(), 1200)
+            );
+
+            let requests = server.requests();
+            assert!(
+                requests.iter().all(|request| !matches!(
+                    request.path.as_str(),
+                    "/v1/models" | "/v1/settings" | "/v1/user"
+                )),
+                "AgentDesk custom providers must not perform remote discovery:\n{}",
+                server.request_log_summary()
+            );
+            let inference = requests
+                .iter()
+                .find(|request| request.path == inference_path)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{backend} provider should call {inference_path}:\n{}",
+                        server.request_log_summary()
+                    )
+                });
+            assert_eq!(
+                inference.authorization.as_deref(),
+                Some("Bearer agentdesk-memory-only-e2e-secret")
+            );
+            assert_eq!(
+                inference
+                    .body
+                    .as_ref()
+                    .and_then(|body| body.get("model"))
+                    .and_then(Value::as_str),
+                Some("grok-4.5")
+            );
+            assert!(
+                !client.stderr().contains(API_KEY),
+                "the desktop credential must never appear in sidecar diagnostics"
+            );
+            assert!(
+                !client.home_path().join(".grok").join("auth.json").exists(),
+                "the desktop credential must remain memory-only"
+            );
+
+            let exit_status = client.shutdown_with_timeout().await;
+            assert!(exit_status.success(), "sidecar did not exit cleanly");
+        }
     })
     .await;
 }

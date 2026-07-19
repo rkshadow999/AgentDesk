@@ -1,5 +1,14 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 use crate::util::config::RemoteSettings;
+use std::sync::atomic::{AtomicBool, Ordering};
 use toml::Value as TomlValue;
+
+static REMOTE_FETCH_DISABLED_FOR_PROCESS: AtomicBool = AtomicBool::new(false);
+
+/// Permanently disable remote model/settings fetches for this process.
+pub fn disable_remote_fetch_for_process() {
+    REMOTE_FETCH_DISABLED_FOR_PROCESS.store(true, Ordering::Release);
+}
 
 /// Resolve whether ZDR users are allowed to use the product.
 ///
@@ -38,6 +47,10 @@ pub fn resolve_zdr_access_enabled(
 /// what is unreachable when this knob is needed (firewalled / air-gapped
 /// deployments), and an env var would be one more way to re-arm the fetches.
 pub fn resolve_remote_fetch_enabled() -> bool {
+    if REMOTE_FETCH_DISABLED_FOR_PROCESS.load(Ordering::Acquire) {
+        return false;
+    }
+
     match crate::config::ConfigLayers::load() {
         Ok(layers) => remote_fetch_enabled_from_layers(&layers),
         // The full-layer load is all-or-nothing, but the policy tiers load

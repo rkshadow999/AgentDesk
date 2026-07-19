@@ -1,10 +1,4 @@
-#![allow(
-    unused_imports,
-    unused_variables,
-    unused_mut,
-    unreachable_code,
-    dead_code
-)]
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! OS-level sandboxing for Grok Build via [nono](https://crates.io/crates/nono).
 //!
 //! Applied once at process startup. Covers in-process `tokio::fs` calls
@@ -39,7 +33,7 @@ pub use profiles::{
     ProfileName, SandboxConfig, SandboxProfile, load_sandbox_config, sandbox_profile_conflicts,
 };
 use std::path::Path;
-#[cfg(any(target_os = "linux", all(feature = "enforce", test)))]
+#[cfg(any(target_os = "linux", all(feature = "enforce", test, unix)))]
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,6 +43,21 @@ static CONFIGURED_PROFILE: OnceLock<String> = OnceLock::new();
 static RESTRICT_CHILD_NETWORK: AtomicBool = AtomicBool::new(false);
 static AUTO_ALLOW_BASH: AtomicBool = AtomicBool::new(false);
 const BWRAP_ENV_VAR: &str = "__GROK_INSIDE_BWRAP";
+pub const REQUIRE_ENFORCEMENT_ENV_VAR: &str = "GROK_SANDBOX_REQUIRE_ENFORCEMENT";
+
+/// Whether the caller requires OS sandbox enforcement and forbids fallback.
+pub fn enforcement_required() -> bool {
+    std::env::var(REQUIRE_ENFORCEMENT_ENV_VAR).is_ok_and(|value| value == "1")
+}
+
+/// Reject configurations that explicitly require enforcement while disabling it.
+pub fn validate_required_profile(profile: &ProfileName) -> anyhow::Result<()> {
+    if enforcement_required() && *profile == ProfileName::Off {
+        anyhow::bail!("sandbox enforcement is required but the configured profile is off");
+    }
+    Ok(())
+}
+
 pub fn is_inside_bwrap() -> bool {
     std::env::var(BWRAP_ENV_VAR).is_ok()
 }
@@ -63,6 +72,13 @@ struct GlobalSandboxState {
 /// Whether child subprocesses should have network blocked via seccomp.
 pub fn should_restrict_child_network() -> bool {
     RESTRICT_CHILD_NETWORK.load(Ordering::Relaxed)
+}
+/// Whether every child-process launch path is covered by kernel network enforcement.
+///
+/// The current seccomp integration is per-command and does not cover every helper,
+/// plugin, hook, or PTY spawn path, so it must not be used as a strict attestation.
+pub fn child_network_fully_enforced() -> bool {
+    false
 }
 /// Whether bash commands should be auto-approved when the sandbox is active.
 pub fn should_auto_allow_bash() -> bool {
@@ -136,6 +152,7 @@ impl SandboxManager {
     /// Degrades gracefully if the platform doesn't support it.
     #[cfg(all(feature = "enforce", unix))]
     pub fn apply(&mut self, workspace: &Path) -> anyhow::Result<()> {
+        validate_required_profile(&self.profile)?;
         if self.profile == ProfileName::Off {
             tracing::info!("Sandbox disabled (profile: off)");
             return Ok(());
@@ -151,6 +168,12 @@ impl SandboxManager {
                 workspace,
                 &support.details,
             ));
+            if enforcement_required() {
+                anyhow::bail!(
+                    "sandbox enforcement is required but unsupported: {}",
+                    support.details
+                );
+            }
             return Ok(());
         }
         let config = profiles::load_sandbox_config(workspace);
@@ -188,6 +211,9 @@ impl SandboxManager {
                     workspace,
                     &e,
                 ));
+                if enforcement_required() {
+                    anyhow::bail!("sandbox enforcement is required but apply failed: {e}");
+                }
                 Ok(())
             }
         }
@@ -195,6 +221,10 @@ impl SandboxManager {
     /// Stub when `enforce` feature is disabled — sandbox is not applied.
     #[cfg(not(all(feature = "enforce", unix)))]
     pub fn apply(&mut self, _workspace: &Path) -> anyhow::Result<()> {
+        validate_required_profile(&self.profile)?;
+        if self.profile != ProfileName::Off && enforcement_required() {
+            anyhow::bail!("sandbox enforcement is required but unavailable on this platform");
+        }
         tracing::info!(
             profile = % self.profile,
             "Sandbox enforcement unavailable (built without 'enforce' feature)"
@@ -611,6 +641,19 @@ mod tests {
     fn configured_profile_is_recorded() {
         set_configured_profile("read-only");
         assert_eq!(configured_profile_name(), Some("read-only"));
+    }
+
+    #[test]
+    fn partial_child_filters_are_not_a_global_network_attestation() {
+        assert!(!child_network_fully_enforced());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn required_enforcement_rejects_the_off_profile() {
+        let _required = EnvGuard::set(REQUIRE_ENFORCEMENT_ENV_VAR, "1");
+
+        assert!(validate_required_profile(&ProfileName::Off).is_err());
     }
     /// Create a temp workspace whose `.grok/sandbox.toml` contains `toml_body`.
     /// Returns the workspace path (caller removes it).

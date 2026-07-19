@@ -1,0 +1,92 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RootNamespace>AgentDesk.App</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <PlatformTarget Condition="'$(Platform)' == 'x64'">x64</PlatformTarget>
+    <PlatformTarget Condition="'$(Platform)' == 'ARM64'">ARM64</PlatformTarget>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and '$(Platform)' == 'x64'">win-x64</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and '$(Platform)' == 'ARM64'">win-arm64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+    <PackageMode Condition="'$(PackageMode)' == ''">Portable</PackageMode>
+    <WindowsPackageType Condition="'$(PackageMode)' != 'MSIX'">None</WindowsPackageType>
+    <WindowsPackageType Condition="'$(PackageMode)' == 'MSIX'">MSIX</WindowsPackageType>
+    <EnableMsixTooling Condition="'$(PackageMode)' != 'MSIX'">false</EnableMsixTooling>
+    <EnableMsixTooling Condition="'$(PackageMode)' == 'MSIX'">true</EnableMsixTooling>
+    <AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishSingleFile>false</PublishSingleFile>
+    <DefaultLanguage>zh-CN</DefaultLanguage>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FlaUI.Core" Version="5.0.0" />
+    <PackageReference Include="FlaUI.UIA3" Version="5.0.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7705" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AgentDesk.Cloud.Client\AgentDesk.Cloud.Client.csproj" />
+    <ProjectReference Include="..\AgentDesk.Core\AgentDesk.Core.csproj" />
+    <ProjectReference Include="..\AgentDesk.Engine\AgentDesk.Engine.csproj" />
+    <ProjectReference Include="..\AgentDesk.Platform.Windows\AgentDesk.Platform.Windows.csproj" />
+    <ProjectReference Include="..\AgentDesk.Updater.Core\AgentDesk.Updater.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AgentDesk.App.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\web\dist\**\*"
+             Condition="Exists('..\..\web\dist\index.html')">
+      <Link>web\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\update\AgentDesk-update-public-key.spki.base64"
+                      LogicalName="AgentDesk.UpdatePublicKey.SpkiBase64" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+    <Content Remove="Assets\AgentDesk.svg" />
+    <Content Remove="Assets\Generate-AppAssets.ps1" />
+    <Content Remove="tests\**\*" />
+    <EmbeddedResource Remove="tests\**\*" />
+    <None Remove="tests\**\*" />
+  </ItemGroup>
+
+  <Target Name="AgentDeskCopyCompiledXamlToPublish"
+          AfterTargets="Publish"
+          Condition="'$(WindowsPackageType)' == 'None'">
+    <ItemGroup>
+      <_AgentDeskCompiledXaml Include="$(TargetDir)*.xbf" />
+      <_AgentDeskResourceIndex Include="$(TargetDir)$(AssemblyName).pri" />
+    </ItemGroup>
+    <Error Condition="'@(_AgentDeskCompiledXaml)' == ''"
+           Text="AgentDesk publish is missing compiled WinUI XAML payloads." />
+    <Error Condition="'@(_AgentDeskResourceIndex)' == ''"
+           Text="AgentDesk publish is missing its application resource index." />
+    <Copy SourceFiles="@(_AgentDeskCompiledXaml)"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_AgentDeskResourceIndex)"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

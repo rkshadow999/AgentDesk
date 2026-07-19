@@ -1,9 +1,63 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 pub mod find_protoc;
 
 use anyhow::Context;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::{fs, iter};
+
+fn parse_dependency_output(output: &str) -> anyhow::Result<Vec<String>> {
+    let (_, dependencies) = output
+        .split_once(": ")
+        .context("protoc dependency output is missing the target separator")?;
+
+    let mut paths = Vec::new();
+    let mut path = String::new();
+    let mut chars = dependencies.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.peek().copied() {
+                Some('\n') => {
+                    chars.next();
+                    continue;
+                }
+                Some('\r') => {
+                    chars.next();
+                    if chars.peek() == Some(&'\n') {
+                        chars.next();
+                    }
+                    continue;
+                }
+                Some(' ') => {
+                    chars.next();
+                    path.push(' ');
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        if ch.is_whitespace() {
+            if !path.is_empty() {
+                paths.push(std::mem::take(&mut path));
+            }
+        } else {
+            path.push(ch);
+        }
+    }
+
+    if !path.is_empty() {
+        paths.push(path);
+    }
+
+    Ok(paths)
+}
+
+fn is_well_known_include(path: &str) -> bool {
+    path.replace('\\', "/")
+        .contains("/include/google/protobuf/")
+}
 
 /// Find the protoc well-known types include directory.
 ///
@@ -114,10 +168,24 @@ impl XaiProtoBuilder {
 
         // Can only process one input file when using --dependency_out=FILE.
         for proto in protos {
+            let temporary_dir =
+                tempfile::TempDir::new().context("failed to create protoc dependency directory")?;
+            let dependency_path = temporary_dir.path().join("dependencies.d");
+            let descriptor_path = temporary_dir.path().join("descriptor.pb");
+
             let mut command = Command::new(protoc.unwrap_or(Path::new("protoc")));
-            command
-                .arg("--dependency_out=/dev/stdout")
-                .arg("--descriptor_set_out=/dev/null");
+            command.arg(format!(
+                "--dependency_out={}",
+                dependency_path
+                    .to_str()
+                    .context("dependency path not UTF-8")?
+            ));
+            command.arg(format!(
+                "--descriptor_set_out={}",
+                descriptor_path
+                    .to_str()
+                    .context("descriptor path not UTF-8")?
+            ));
 
             // Add protoc's well-known types include directory first (if found).
             // This is needed for Bazel sandboxed builds where protoc and its
@@ -138,31 +206,27 @@ impl XaiProtoBuilder {
             command.stdin(Stdio::null());
             command.stderr(Stdio::inherit());
 
-            let output = command.output().context("protoc command failed")?;
-            if !output.status.success() {
+            let status = command.status().context("protoc command failed")?;
+            if !status.success() {
                 return Err(anyhow::anyhow!("protoc command failed"));
             }
 
-            let output =
-                String::from_utf8(output.stdout).context("protoc command output not UTF-8")?;
-
-            let mut lines = output.lines();
-            let first_line = lines.next().context("protoc command output is empty")?;
-            let prefix = "/dev/null:";
-            let rem = first_line.strip_prefix(prefix).with_context(|| {
-                format!("protoc command output must start with /dev/null: {output:?}")
+            let output = fs::read_to_string(&dependency_path).with_context(|| {
+                format!(
+                    "failed to read protoc dependencies from {}",
+                    dependency_path.display()
+                )
             })?;
-            for line in iter::once(rem).chain(lines) {
-                let line = line.trim();
-                let line = line.strip_suffix("\\").unwrap_or(line);
+
+            for line in parse_dependency_output(&output)? {
                 // Depending on absolute paths like
                 // /Users/user/homebrew/Cellar/protobuf/29.1/include/google/protobuf/timestamp.proto
                 // is valid, but we want to have output more deterministic.
-                if line.contains("/include/google/protobuf/") {
+                if is_well_known_include(&line) {
                     continue;
                 }
 
-                if !fs::exists(line)? {
+                if !fs::exists(&line)? {
                     return Err(anyhow::anyhow!("dependency file not found: {line}"));
                 }
 
@@ -271,6 +335,51 @@ impl XaiProtoBuilder {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_well_known_include, parse_dependency_output};
+
+    #[test]
+    fn parse_dependency_output_accepts_unix_target_paths() {
+        let paths = parse_dependency_output(
+            "/tmp/xai-proto-build.pbbin: proto/api.proto \\\n             proto/common.proto\n",
+        )
+        .expect("parse dependency output");
+
+        assert_eq!(paths, ["proto/api.proto", "proto/common.proto"]);
+    }
+
+    #[test]
+    fn parse_dependency_output_ignores_windows_drive_colon() {
+        let paths = parse_dependency_output(
+            "C:\\Temp\\xai-proto-build.pbbin: proto\\api.proto \\\n             proto\\common.proto\n",
+        )
+        .expect("parse dependency output");
+
+        assert_eq!(paths, ["proto\\api.proto", "proto\\common.proto"]);
+    }
+
+    #[test]
+    fn parse_dependency_output_unescapes_spaces_without_changing_windows_separators() {
+        let paths = parse_dependency_output(
+            "C:\\Temp\\descriptor.pb: C:\\source\\project\\proto\\api\\ file.proto\r\n",
+        )
+        .expect("parse dependency output");
+
+        assert_eq!(paths, ["C:\\source\\project\\proto\\api file.proto"]);
+    }
+
+    #[test]
+    fn well_known_include_detection_accepts_windows_separators() {
+        assert!(is_well_known_include(
+            "C:\\protobuf\\include\\google\\protobuf\\timestamp.proto"
+        ));
+        assert!(!is_well_known_include(
+            "proto\\google\\protobuf\\local.proto"
+        ));
     }
 }
 

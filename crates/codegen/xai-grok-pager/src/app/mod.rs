@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Application entry point and terminal management.
 //!
 //! Submodule overview:
@@ -46,8 +47,8 @@ mod turn_completion;
 mod xt_filter;
 pub(crate) use crate::terminal::kitty_flags_pushed;
 pub use cli::{
-    AgentArgs, AgentCmd, Command, HeadlessArgs, LeaderArgs, LeaderMgmtArgs, LeaderMgmtCommand,
-    LeaderTargetArgs, OutputFormat, PagerArgs, ServeArgs, WrapArgs,
+    AgentArgs, AgentCmd, AgentDeskOpenAiBackend, Command, HeadlessArgs, LeaderArgs, LeaderMgmtArgs,
+    LeaderMgmtCommand, LeaderTargetArgs, OutputFormat, PagerArgs, ServeArgs, WrapArgs,
 };
 pub use cli::{WorkspaceMgmtArgs, WorkspaceMgmtCommand, WorkspaceStartArgs};
 use crossterm::cursor::{self, SetCursorStyle};

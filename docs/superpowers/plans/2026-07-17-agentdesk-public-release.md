@@ -4,7 +4,7 @@
 
 > **For AI agent workers:** Required subskill: use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task by task. Track progress with the checkboxes below.
 
-**Goal:** Publish the verified AgentDesk Alpha as a compliant, bilingual public repository at `rkshadow/AgentDesk`.
+**Goal:** Publish the verified AgentDesk Alpha as a compliant, bilingual public repository at `rkshadow999/AgentDesk`.
 
 **Architecture:** Keep the complete `xai-org/grok-build` history and licenses, replace upstream product identity only at AgentDesk-owned entry points, generate desktop dependency notices from source metadata, and enforce the publication contract with a PowerShell validator in CI. The upstream remote becomes fetch-only and the community repository becomes `origin`.
 
@@ -98,7 +98,7 @@ Use the same section order and link only to Chinese community documents.
 `CONTRIBUTING.md` must accept issues and pull requests, require focused tests, preserve upstream notices, and prohibit generated/binary churn. `SECURITY.md` must direct confidential reports to:
 
 ```text
-https://github.com/rkshadow/AgentDesk/security/advisories/new
+https://github.com/rkshadow999/AgentDesk/security/advisories/new
 ```
 
 - [ ] **Step 4: Add Contributor Covenant 2.1 in both languages**
@@ -345,7 +345,7 @@ Expected: authenticated as `rkshadow` with `repo` and workflow access.
 - [ ] **Step 2: Create the empty public repository**
 
 ```powershell
-gh repo create rkshadow/AgentDesk --public --description "Independent bilingual Windows 11 desktop client for the grok-build agent runtime"
+gh repo create rkshadow999/AgentDesk --public --description "Independent bilingual Windows 11 desktop client for the grok-build agent runtime"
 ```
 
 - [ ] **Step 3: Rewire remotes safely**
@@ -353,7 +353,7 @@ gh repo create rkshadow/AgentDesk --public --description "Independent bilingual 
 ```powershell
 git remote rename origin upstream
 git remote set-url --push upstream DISABLED
-git remote add origin https://github.com/rkshadow/AgentDesk.git
+git remote add origin https://github.com/rkshadow999/AgentDesk.git
 git branch -M main
 git push -u origin main
 ```
@@ -361,9 +361,9 @@ git push -u origin main
 - [ ] **Step 4: Configure community repository features**
 
 ```powershell
-gh repo edit rkshadow/AgentDesk --enable-issues --enable-discussions --enable-delete-branch --disable-wiki
-gh api --method PUT repos/rkshadow/AgentDesk/private-vulnerability-reporting
-gh repo edit rkshadow/AgentDesk --add-topic windows-11,winui3,dotnet,rust,acp,ai-agent,chinese
+gh repo edit rkshadow999/AgentDesk --enable-issues --enable-discussions --enable-delete-branch --disable-wiki
+gh api --method PUT repos/rkshadow999/AgentDesk/private-vulnerability-reporting
+gh repo edit rkshadow999/AgentDesk --add-topic windows-11,winui3,dotnet,rust,acp,ai-agent,chinese
 ```
 
 - [ ] **Step 5: Protect main after the initial push**
@@ -373,8 +373,8 @@ Use the GitHub branch protection API to require pull requests and block force pu
 - [ ] **Step 6: Verify the public repository**
 
 ```powershell
-gh repo view rkshadow/AgentDesk --json nameWithOwner,isPrivate,defaultBranchRef,url
-gh run list --repo rkshadow/AgentDesk --limit 5
+gh repo view rkshadow999/AgentDesk --json nameWithOwner,isPrivate,defaultBranchRef,url
+gh run list --repo rkshadow999/AgentDesk --limit 5
 git remote -v
 ```
 

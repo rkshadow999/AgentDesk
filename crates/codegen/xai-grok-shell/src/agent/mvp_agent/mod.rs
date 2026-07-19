@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 #![cfg_attr(rustfmt, rustfmt::skip)]
 #![allow(unused_imports)]
 use std::path::PathBuf;
@@ -636,6 +637,11 @@ pub struct MvpAgent {
     /// one — `resident_roster_entry` can't read disk.
     resident_roster_titles: RefCell<HashMap<String, String>>,
     pub(crate) initialize_request: OnceLock<acp::InitializeRequest>,
+    /// Set after a successful `agentdesk/v1/initialize` handshake. AgentDesk's
+    /// single-connection sidecar uses this process-local state for safety
+    /// policy; request-provided client identifiers are only an additional
+    /// fail-closed compatibility signal.
+    agentdesk_extension_initialized: std::cell::Cell<bool>,
     pub(crate) gateway: GatewaySender,
     /// Agent configuration. LEADER-SAFE(init-once): never mutated after construction.
     pub(crate) cfg: RefCell<AgentConfig>,

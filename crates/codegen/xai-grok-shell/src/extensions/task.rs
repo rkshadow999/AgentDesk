@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 use agent_client_protocol as acp;
 use serde::{Deserialize, Serialize};
 use xai_grok_tools::types::{KillOutcome, TaskSnapshot};
@@ -55,6 +56,7 @@ struct ListTasksResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelSubagentRequest {
+    pub session_id: String,
     pub subagent_id: String,
 }
 
@@ -99,6 +101,8 @@ impl From<SubagentCancelOutcome> for SubagentCancelOutcomeDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelSubagentResponse {
+    #[serde(default)]
+    pub session_id: String,
     pub subagent_id: String,
     /// Legacy wire-compat flag for older pagers; new clients prefer `outcome`.
     pub cancelled: bool,
@@ -118,6 +122,7 @@ struct ListRunningSubagentsRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ListRunningSubagentsResponse {
+    session_id: String,
     subagents: Vec<SubagentLiveSnapshotDto>,
 }
 
@@ -166,6 +171,7 @@ impl From<ResolvedRunningSubagent> for SubagentLiveSnapshotDto {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GetSubagentRequest {
+    session_id: String,
     subagent_id: String,
     #[serde(default)]
     block: Option<bool>,
@@ -176,6 +182,7 @@ struct GetSubagentRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GetSubagentResponse {
+    session_id: String,
     snapshot: Option<SubagentSnapshotDto>,
 }
 
@@ -326,6 +333,23 @@ fn respond<T: Serialize>(result: Result<T, impl std::fmt::Display>) -> ExtResult
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
 
+fn validate_subagent_session_ids(
+    ids: Option<(String, String)>,
+    requested_session_id: &str,
+) -> Result<Option<(String, String)>, String> {
+    if requested_session_id.trim().is_empty() {
+        return Err("sessionId must not be empty".to_string());
+    }
+
+    if let Some((parent_session_id, _)) = ids.as_ref()
+        && parent_session_id != requested_session_id
+    {
+        return Err("subagent does not belong to the requested session".to_string());
+    }
+
+    Ok(ids)
+}
+
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "x.ai/task/kill" => {
@@ -391,9 +415,16 @@ pub async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
     match args.method.as_ref() {
         "x.ai/subagent/cancel" => {
             let req: CancelSubagentRequest = parse(args)?;
+            if let Err(error) = validate_subagent_session_ids(
+                agent.session_ids_for_subagent(&req.subagent_id),
+                &req.session_id,
+            ) {
+                return respond(Err::<CancelSubagentResponse, _>(error));
+            }
             tracing::info!(subagent_id = %req.subagent_id, "Cancelling subagent via ext method");
             let outcome = SubagentCancelOutcomeDto::from(agent.cancel_subagent(&req.subagent_id));
             respond(Ok::<_, String>(CancelSubagentResponse {
+                session_id: req.session_id,
                 subagent_id: req.subagent_id,
                 cancelled: outcome.cancelled_bool(),
                 outcome: Some(outcome),
@@ -404,7 +435,13 @@ pub async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
             let block = req.block.unwrap_or(false);
             let timeout_ms = req.timeout_ms.unwrap_or(30_000);
 
-            let ids = agent.session_ids_for_subagent(&req.subagent_id);
+            let ids = match validate_subagent_session_ids(
+                agent.session_ids_for_subagent(&req.subagent_id),
+                &req.session_id,
+            ) {
+                Ok(ids) => ids,
+                Err(error) => return respond(Err::<GetSubagentResponse, _>(error)),
+            };
             let (parent_sid, child_sid) = ids.unwrap_or_default();
             let provenance = agent.provenance_for_subagent(&req.subagent_id);
 
@@ -432,12 +469,14 @@ pub async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
                     let still_running = snap.as_ref().is_some_and(is_running);
                     if !still_running || tokio::time::Instant::now() >= deadline {
                         return respond(Ok::<_, String>(GetSubagentResponse {
+                            session_id: req.session_id.clone(),
                             snapshot: snap.map(&to_dto),
                         }));
                     }
                 }
             } else {
                 respond(Ok::<_, String>(GetSubagentResponse {
+                    session_id: req.session_id,
                     snapshot: snapshot.map(to_dto),
                 }))
             }
@@ -452,7 +491,10 @@ pub async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
                 .into_iter()
                 .map(SubagentLiveSnapshotDto::from)
                 .collect();
-            respond(Ok::<_, String>(ListRunningSubagentsResponse { subagents }))
+            respond(Ok::<_, String>(ListRunningSubagentsResponse {
+                session_id: req.session_id,
+                subagents,
+            }))
         }
         _ => Err(acp::Error::method_not_found()),
     }
@@ -543,8 +585,12 @@ mod tests {
 
     #[test]
     fn list_running_response_serializes_with_subagents_array() {
-        let resp = ListRunningSubagentsResponse { subagents: vec![] };
+        let resp = ListRunningSubagentsResponse {
+            session_id: "session-1".into(),
+            subagents: vec![],
+        };
         let json = serde_json::to_value(&resp).expect("should serialize");
+        assert_eq!(json["sessionId"], "session-1");
         assert_eq!(json["subagents"], serde_json::json!([]));
     }
 
@@ -677,8 +723,12 @@ mod tests {
 
     #[test]
     fn get_subagent_response_null_snapshot() {
-        let resp = GetSubagentResponse { snapshot: None };
+        let resp = GetSubagentResponse {
+            session_id: "session-1".into(),
+            snapshot: None,
+        };
         let json = serde_json::to_value(&resp).expect("should serialize");
+        assert_eq!(json["sessionId"], "session-1");
         assert!(json["snapshot"].is_null());
     }
 
@@ -702,6 +752,7 @@ mod tests {
             },
         };
         let resp = GetSubagentResponse {
+            session_id: "parent-1".into(),
             snapshot: Some(SubagentSnapshotDto::from_snapshot(
                 snap,
                 "parent-1".into(),
@@ -738,6 +789,7 @@ mod tests {
             },
         };
         let resp = GetSubagentResponse {
+            session_id: "parent-2".into(),
             snapshot: Some(SubagentSnapshotDto::from_snapshot(
                 snap,
                 "parent-2".into(),
@@ -758,8 +810,9 @@ mod tests {
 
     #[test]
     fn get_subagent_request_deserializes_block_false() {
-        let json = r#"{"subagentId":"sub-1","block":false}"#;
+        let json = r#"{"sessionId":"session-1","subagentId":"sub-1","block":false}"#;
         let req: GetSubagentRequest = serde_json::from_str(json).expect("should parse");
+        assert_eq!(req.session_id, "session-1");
         assert_eq!(req.subagent_id, "sub-1");
         assert_eq!(req.block, Some(false));
         assert!(req.timeout_ms.is_none());
@@ -767,8 +820,10 @@ mod tests {
 
     #[test]
     fn get_subagent_request_deserializes_block_true_with_timeout() {
-        let json = r#"{"subagentId":"sub-2","block":true,"timeoutMs":5000}"#;
+        let json =
+            r#"{"sessionId":"session-2","subagentId":"sub-2","block":true,"timeoutMs":5000}"#;
         let req: GetSubagentRequest = serde_json::from_str(json).expect("should parse");
+        assert_eq!(req.session_id, "session-2");
         assert_eq!(req.subagent_id, "sub-2");
         assert_eq!(req.block, Some(true));
         assert_eq!(req.timeout_ms, Some(5000));
@@ -776,10 +831,45 @@ mod tests {
 
     #[test]
     fn get_subagent_request_defaults_block_and_timeout() {
-        let json = r#"{"subagentId":"sub-3"}"#;
+        let json = r#"{"sessionId":"session-3","subagentId":"sub-3"}"#;
         let req: GetSubagentRequest = serde_json::from_str(json).expect("should parse");
+        assert_eq!(req.session_id, "session-3");
         assert!(req.block.is_none());
         assert!(req.timeout_ms.is_none());
+    }
+
+    #[test]
+    fn subagent_requests_require_parent_session_id() {
+        assert!(
+            serde_json::from_str::<CancelSubagentRequest>(r#"{"subagentId":"sub-1"}"#).is_err()
+        );
+        assert!(serde_json::from_str::<GetSubagentRequest>(r#"{"subagentId":"sub-1"}"#).is_err());
+        assert!(
+            serde_json::from_str::<ListRunningSubagentsRequest>(r#"{"session":"ignored"}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn subagent_requests_deserialize_parent_session_id() {
+        let cancel: CancelSubagentRequest =
+            serde_json::from_str(r#"{"sessionId":"session-1","subagentId":"sub-1"}"#)
+                .expect("cancel should parse");
+        let list: ListRunningSubagentsRequest =
+            serde_json::from_str(r#"{"sessionId":"session-1"}"#).expect("list should parse");
+
+        assert_eq!(cancel.session_id, "session-1");
+        assert_eq!(list.session_id, "session-1");
+    }
+
+    #[test]
+    fn validate_subagent_session_ids_rejects_another_parent_session() {
+        let matching = Some(("session-1".into(), "child-1".into()));
+        let mismatched = Some(("session-2".into(), "child-1".into()));
+
+        assert!(validate_subagent_session_ids(matching, "session-1").is_ok());
+        assert!(validate_subagent_session_ids(None, "session-1").is_ok());
+        assert!(validate_subagent_session_ids(mismatched, "session-1").is_err());
     }
 
     // ── Polling control-flow tests ──────────────────────────────────────
@@ -986,6 +1076,7 @@ mod tests {
     #[test]
     fn cancel_subagent_response_serializes_outcome_snake_case() {
         let resp = CancelSubagentResponse {
+            session_id: "session-1".into(),
             subagent_id: "sa-1".into(),
             cancelled: false,
             outcome: Some(SubagentCancelOutcomeDto::AlreadyFinished {
@@ -993,6 +1084,7 @@ mod tests {
             }),
         };
         let json = serde_json::to_value(&resp).expect("should serialize");
+        assert_eq!(json["sessionId"], "session-1");
         assert_eq!(json["subagentId"], "sa-1");
         assert_eq!(json["cancelled"], false);
         assert_eq!(json["outcome"]["kind"], "already_finished");

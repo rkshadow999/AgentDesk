@@ -6,7 +6,7 @@
 
 ## Objective
 
-Publish the current AgentDesk Alpha as `rkshadow/AgentDesk`, a public community project that can be forked and extended without presenting itself as an official xAI, SpaceXAI, OpenAI, or Codex product.
+Publish the current AgentDesk Alpha as `rkshadow999/AgentDesk`, a public community project that can be forked and extended without presenting itself as an official xAI, SpaceXAI, OpenAI, or Codex product.
 
 ## Repository Identity
 
@@ -40,7 +40,7 @@ Every paired document links to its counterpart at the top. License texts and cop
 
 - Contributions are accepted through issues and pull requests under a documented test and review workflow.
 - The code of conduct uses Contributor Covenant 2.1 with AgentDesk-specific enforcement contact through repository moderation, not an upstream corporate contact.
-- Security reports use GitHub Private Vulnerability Reporting at `https://github.com/rkshadow/AgentDesk/security/advisories/new`.
+- Security reports use GitHub Private Vulnerability Reporting at `https://github.com/rkshadow999/AgentDesk/security/advisories/new`.
 - Public issues must not be used for undisclosed vulnerabilities, credentials, prompts, or private source code.
 - Repository-local Git author identity uses the GitHub noreply address for `rkshadow`.
 

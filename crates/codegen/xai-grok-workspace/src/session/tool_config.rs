@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Tool config resolution pipeline.
 //!
 //! Five-step resolution:
@@ -523,7 +524,7 @@ fn build_web_fetch_config() -> xai_grok_tools::implementations::grok_build::web_
 fn default_web_search_model() -> String {
     std::env::var("GROK_WEB_SEARCH_MODEL").unwrap_or_else(|_| "grok-4.20-multi-agent".to_string())
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use crate::config::SessionContextFactory;
     use std::collections::HashMap;
@@ -1203,3 +1204,4 @@ mod tests {
         }
     }
 }
+// Modified by the AgentDesk project for Windows desktop integration and safety support.

@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Subagent coordinator — spawns and tracks hidden child sessions.
 //!
 //! All subagent-specific types, tracking state, and orchestration logic live here.
@@ -38,6 +39,40 @@ use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_grok_tools::implementations::grok_build::task::types::*;
 use xai_grok_workspace::file_system::AsyncFileSystem;
 use xai_hunk_tracker::HunkTrackerHandle;
+
+const AGENTDESK_SUBAGENT_WORKTREE_MODE_ENV: &str = "AGENTDESK_SUBAGENT_WORKTREE_MODE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentDeskWorktreeFailureAction {
+    Abort,
+    Share,
+}
+
+fn agentdesk_strict_worktree_required(mode: Option<&str>) -> bool {
+    mode == Some("strict")
+}
+
+fn resolve_agentdesk_subagent_isolation(
+    mode: Option<&str>,
+    isolation: xai_tool_types::SubagentIsolationMode,
+) -> xai_tool_types::SubagentIsolationMode {
+    if isolation == xai_tool_types::SubagentIsolationMode::None
+        && agentdesk_strict_worktree_required(mode)
+    {
+        xai_tool_types::SubagentIsolationMode::Worktree
+    } else {
+        isolation
+    }
+}
+
+fn agentdesk_worktree_failure_action(strict: bool) -> AgentDeskWorktreeFailureAction {
+    if strict {
+        AgentDeskWorktreeFailureAction::Abort
+    } else {
+        AgentDeskWorktreeFailureAction::Share
+    }
+}
+
 mod coordinator_lifecycle;
 mod coordinator_query;
 mod handle_request;
@@ -1834,6 +1869,209 @@ fn resume_worktree_action(dir_exists: bool, snapshot_ref: Option<&str>) -> Resum
     } else {
         ResumeWorktreeAction::Shared
     }
+}
+
+fn resolve_agentdesk_reused_worktree(
+    strict: bool,
+    dest: &Path,
+    ctx: &SubagentSpawnContext,
+) -> Result<PathBuf, String> {
+    if !strict {
+        return Ok(dest.to_path_buf());
+    }
+
+    let parent_workspace = parent_source_cwd(ctx);
+    let source_repo = resolve_subagent_source_repo(ctx);
+    let managed_base = crate::session::worktree::worktree_base_dir_for_source(&parent_workspace)
+        .map_err(|e| format!("could not resolve the managed worktree base: {e}"))?;
+    validate_agentdesk_strict_reused_worktree(dest, &parent_workspace, &source_repo, &managed_base)
+}
+
+fn validate_agentdesk_strict_reused_worktree(
+    dest: &Path,
+    parent_workspace: &Path,
+    source_repo: &Path,
+    managed_base: &Path,
+) -> Result<PathBuf, String> {
+    let canonical_dest = canonicalize_agentdesk_worktree_path("saved worktree", dest)?;
+    let canonical_parent =
+        canonicalize_agentdesk_worktree_path("parent workspace", parent_workspace)?;
+    if path_is_same_or_descendant(&canonical_dest, &canonical_parent)
+        || path_is_same_or_descendant(&canonical_parent, &canonical_dest)
+    {
+        return Err("saved worktree aliases or contains the parent workspace".to_string());
+    }
+
+    let canonical_base =
+        canonicalize_agentdesk_worktree_path("managed worktree base", managed_base)?;
+    if canonical_dest.parent() != Some(canonical_base.as_path()) {
+        return Err("saved worktree is outside the managed subagent worktree base".to_string());
+    }
+    ensure_agentdesk_plain_directory(managed_base, "managed worktree base")?;
+    ensure_agentdesk_plain_directory(dest, "saved worktree")?;
+
+    let repository = git2::Repository::open(&canonical_dest)
+        .map_err(|e| format!("saved worktree is not a Git repository or worktree: {e}"))?;
+    let workdir = repository
+        .workdir()
+        .ok_or_else(|| "saved worktree opened as a bare Git repository".to_string())?;
+    let canonical_workdir = canonicalize_agentdesk_worktree_path("Git workdir", workdir)?;
+    if !paths_equal(&canonical_workdir, &canonical_dest) {
+        return Err("saved worktree Git workdir does not match its managed path".to_string());
+    }
+
+    let canonical_source = canonicalize_agentdesk_worktree_path("source repository", source_repo)?;
+    let db = xai_fast_worktree::WorktreeDb::open_default()
+        .map_err(|e| format!("could not open the managed worktree registry: {e}"))?;
+    let records = db
+        .list(&xai_fast_worktree::ListFilter {
+            include_dead: true,
+            ..Default::default()
+        })
+        .map_err(|e| format!("could not query the managed worktree registry: {e}"))?;
+    let mut matching_records = Vec::new();
+    for record in records {
+        let Ok(record_path) =
+            canonicalize_agentdesk_worktree_path("registered worktree", &record.path)
+        else {
+            continue;
+        };
+        if paths_equal(&record_path, &canonical_dest) {
+            matching_records.push(record);
+        }
+    }
+    let record = match matching_records.as_slice() {
+        [record] => record,
+        [] => return Err("saved worktree is not registered as a managed worktree".to_string()),
+        _ => {
+            return Err(
+                "saved worktree has ambiguous managed worktree registry records".to_string(),
+            );
+        }
+    };
+    if record.kind != xai_fast_worktree::WorktreeKind::Subagent
+        || record.status != xai_fast_worktree::WorktreeStatus::Alive
+    {
+        return Err("saved worktree is not an active managed subagent worktree".to_string());
+    }
+    let canonical_record_path =
+        canonicalize_agentdesk_worktree_path("registered worktree", &record.path)?;
+    if !paths_equal(&canonical_record_path, &canonical_dest) {
+        return Err("managed worktree registry path does not match the saved worktree".to_string());
+    }
+    let record_source = match record.creation_mode.as_str() {
+        "linked" | "git" => {
+            xai_grok_workspace::session::git::find_main_repo_root_from_path(&record.source_repo)
+                .map_err(|e| format!("registered source repository could not be resolved: {e}"))?
+        }
+        "standalone" => record.source_repo.clone(),
+        _ => return Err("saved worktree has an unsupported creation mode".to_string()),
+    };
+    let canonical_record_source =
+        canonicalize_agentdesk_worktree_path("registered source repository", &record_source)?;
+    if !paths_equal(&canonical_record_source, &canonical_source) {
+        return Err("saved worktree belongs to a different source repository".to_string());
+    }
+
+    match record.creation_mode.as_str() {
+        "linked" | "git" => {
+            let source_repository = git2::Repository::open(&canonical_source)
+                .map_err(|e| format!("source repository could not be opened: {e}"))?;
+            let source_common = canonicalize_agentdesk_worktree_path(
+                "source Git common directory",
+                source_repository.commondir(),
+            )?;
+            let dest_common = canonicalize_agentdesk_worktree_path(
+                "worktree Git common directory",
+                repository.commondir(),
+            )?;
+            if !paths_equal(&source_common, &dest_common) {
+                return Err("saved worktree is linked to a different Git repository".to_string());
+            }
+        }
+        "standalone" => {
+            let git_dir = canonicalize_agentdesk_worktree_path(
+                "standalone Git directory",
+                repository.path(),
+            )?;
+            if !path_is_same_or_descendant(&git_dir, &canonical_dest) {
+                return Err(
+                    "standalone worktree Git directory escapes its managed path".to_string()
+                );
+            }
+        }
+        _ => unreachable!("creation mode was validated before source identity comparison"),
+    }
+
+    Ok(canonical_dest)
+}
+
+fn canonicalize_agentdesk_worktree_path(label: &str, path: &Path) -> Result<PathBuf, String> {
+    dunce::canonicalize(path).map_err(|e| format!("could not canonicalize {label}: {e}"))
+}
+
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    path_components_equal(left, right)
+}
+
+fn path_is_same_or_descendant(path: &Path, ancestor: &Path) -> bool {
+    let mut path_components = path.components();
+    for ancestor_component in ancestor.components() {
+        let Some(path_component) = path_components.next() else {
+            return false;
+        };
+        if !os_path_component_equal(path_component.as_os_str(), ancestor_component.as_os_str()) {
+            return false;
+        }
+    }
+    true
+}
+
+fn path_components_equal(left: &Path, right: &Path) -> bool {
+    let mut left_components = left.components();
+    let mut right_components = right.components();
+    loop {
+        match (left_components.next(), right_components.next()) {
+            (None, None) => return true,
+            (Some(left), Some(right))
+                if os_path_component_equal(left.as_os_str(), right.as_os_str()) => {}
+            _ => return false,
+        }
+    }
+}
+
+#[cfg(windows)]
+fn os_path_component_equal(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool {
+    left.to_string_lossy().to_lowercase() == right.to_string_lossy().to_lowercase()
+}
+
+#[cfg(not(windows))]
+fn os_path_component_equal(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool {
+    left == right
+}
+
+fn ensure_agentdesk_plain_directory(path: &Path, label: &str) -> Result<(), String> {
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|e| format!("could not inspect {label}: {e}"))?;
+    if !metadata.is_dir() || agentdesk_metadata_is_link_or_reparse(&metadata) {
+        return Err(format!(
+            "{label} is a link, reparse point, or non-directory"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn agentdesk_metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn agentdesk_metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 /// The parent session's working directory — the source path for a subagent
 /// worktree. Prefers the reconstructed `SessionInfo` cwd, falling back to

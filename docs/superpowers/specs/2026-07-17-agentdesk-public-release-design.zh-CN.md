@@ -6,7 +6,7 @@
 
 ## 目标
 
-将当前 AgentDesk Alpha 发布为 `rkshadow/AgentDesk` 公开社区项目，使其他开发者可以 Fork 和二次开发，同时不把项目呈现为 xAI、SpaceXAI、OpenAI 或 Codex 的官方产品。
+将当前 AgentDesk Alpha 发布为 `rkshadow999/AgentDesk` 公开社区项目，使其他开发者可以 Fork 和二次开发，同时不把项目呈现为 xAI、SpaceXAI、OpenAI 或 Codex 的官方产品。
 
 ## 仓库身份
 
@@ -40,7 +40,7 @@
 
 - 通过明确的测试和审查流程接受 Issue 与 Pull Request。
 - 行为准则采用 Contributor Covenant 2.1，执行渠道使用 AgentDesk 仓库治理，不引用上游公司联系人。
-- 安全问题通过 GitHub Private Vulnerability Reporting 提交：`https://github.com/rkshadow/AgentDesk/security/advisories/new`。
+- 安全问题通过 GitHub Private Vulnerability Reporting 提交：`https://github.com/rkshadow999/AgentDesk/security/advisories/new`。
 - 未公开漏洞、凭据、提示词或私有源码不得发布到公开 Issue。
 - 仓库本地 Git 作者身份使用 `rkshadow` 的 GitHub noreply 邮箱。
 

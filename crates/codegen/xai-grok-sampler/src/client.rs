@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! HTTP client for the xAI sampling APIs.
 //!
 //! Owns the `reqwest::Client`, default request headers, and per-method
@@ -406,7 +407,6 @@ impl SamplingClient {
                 AuthScheme::XApiKey => {
                     let header_value = HeaderValue::from_str(api_key).map_err(|_| {
                         tracing::debug!(
-                            api_key = %api_key,
                             "Invalid api_key: cannot be converted to a valid HTTP header"
                         );
                         SamplingError::Auth(
@@ -420,7 +420,6 @@ impl SamplingClient {
                     let bearer = format!("Bearer {}", api_key);
                     let header_value = HeaderValue::from_str(&bearer).map_err(|_| {
                         tracing::debug!(
-                            api_key = %api_key,
                             "Invalid api_key: cannot be converted to a valid HTTP Authorization header"
                         );
                         SamplingError::Auth(
@@ -567,29 +566,17 @@ impl SamplingClient {
                 }
             }
         }
-        {
-            let auth_prefix = headers
-                .get(AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.chars().take(20).collect::<String>());
-            let x_api_key_prefix = headers
-                .get(HeaderName::from_static("x-api-key"))
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.chars().take(12).collect::<String>());
-            tracing::info!(
-                target: crate::sampling_log::TARGET,
-                event = "client_post",
-                base_url = %self.base_url,
-                model = %self.defaults.model,
-                api_backend = ?self.defaults.api_backend,
-                auth_scheme = ?self.defaults.auth_scheme,
-                has_bearer_resolver = self.bearer_resolver.is_some(),
-                has_authorization_header = headers.get(AUTHORIZATION).is_some(),
-                has_x_api_key_header = headers.get(HeaderName::from_static("x-api-key")).is_some(),
-                auth_header_prefix = auth_prefix.as_deref().unwrap_or("none"),
-                x_api_key_prefix = x_api_key_prefix.as_deref().unwrap_or("none"),
-            );
-        }
+        tracing::info!(
+            target: crate::sampling_log::TARGET,
+            event = "client_post",
+            base_url = %self.base_url,
+            model = %self.defaults.model,
+            api_backend = ?self.defaults.api_backend,
+            auth_scheme = ?self.defaults.auth_scheme,
+            has_bearer_resolver = self.bearer_resolver.is_some(),
+            has_authorization_header = headers.get(AUTHORIZATION).is_some(),
+            has_x_api_key_header = headers.get(HeaderName::from_static("x-api-key")).is_some(),
+        );
         if let Some(injector) = &self.header_injector {
             injector.inject(&mut headers);
         }
@@ -656,16 +643,23 @@ impl SamplingClient {
     }
 
     pub fn auth_info(&self) -> crate::sampling_log::AuthInfo {
-        let auth_prefix = self.current_sent_bearer_prefix();
-        let auth_type = match (&self.defaults.auth_scheme, &auth_prefix) {
-            (AuthScheme::XApiKey, Some(_)) => "x-api-key",
-            (AuthScheme::Bearer, Some(_)) => "bearer",
-            (_, None) => "none",
+        let has_auth = self
+            .bearer_resolver
+            .as_ref()
+            .and_then(|resolver| resolver.current_bearer())
+            .is_some()
+            || match self.defaults.auth_scheme {
+                AuthScheme::XApiKey => self
+                    .default_headers
+                    .contains_key(HeaderName::from_static("x-api-key")),
+                AuthScheme::Bearer => self.default_headers.contains_key(AUTHORIZATION),
+            };
+        let auth_type = match (&self.defaults.auth_scheme, has_auth) {
+            (AuthScheme::XApiKey, true) => "x-api-key",
+            (AuthScheme::Bearer, true) => "bearer",
+            (_, false) => "none",
         };
-        crate::sampling_log::AuthInfo {
-            auth_type,
-            auth_prefix,
-        }
+        crate::sampling_log::AuthInfo { auth_type }
     }
 
     /// Check if a header name contains sensitive information that should be redacted.
@@ -821,10 +815,9 @@ impl SamplingClient {
         }
 
         let completion = serde_json::from_slice::<ChatCompletionResponse>(&bytes).map_err(|e| {
-            let raw_body = String::from_utf8_lossy(&bytes);
             tracing::error!(
                 error = %e,
-                raw_body = %raw_body,
+                response_bytes = bytes.len(),
                 "Failed to deserialize ChatCompletionResponse"
             );
             SamplingError::Serialization(e)
@@ -976,10 +969,9 @@ impl SamplingClient {
                 Some(&resp_headers),
             );
 
-            span.record("error", message.as_str());
+            span.record("error", "api_error");
             tracing::error!(
                 status = %status,
-                error_message = %message,
                 model_id = %model_id,
                 "chat/completions API error"
             );
@@ -1120,8 +1112,11 @@ impl SamplingClient {
         // forwarded by the sampler. Drop it before we send.
         request.trace.take();
 
-        tracing::debug!("create_response: {:?}", &request);
-        tracing::debug!("endpoint: {:?}", self.endpoint("responses"));
+        tracing::debug!(
+            model_id = %model_id,
+            endpoint = %self.endpoint("responses"),
+            "Creating response request"
+        );
 
         let grok_headers = GrokRequestHeaders {
             conv_id: x_grok_conv_id,
@@ -1180,7 +1175,6 @@ impl SamplingClient {
             );
             tracing::warn!(
                 status = %status,
-                error_message = %message,
                 model_id = %model_id,
                 "responses API error"
             );
@@ -1194,10 +1188,9 @@ impl SamplingClient {
         }
 
         let response_obj = serde_json::from_slice::<rs::Response>(&bytes).map_err(|e| {
-            let raw_body = String::from_utf8_lossy(&bytes);
             tracing::error!(
                 error = %e,
-                raw_body = %raw_body,
+                response_bytes = bytes.len(),
                 "Failed to deserialize rs::Response"
             );
             SamplingError::Serialization(e)
@@ -1351,10 +1344,9 @@ impl SamplingClient {
                 Some(&resp_headers),
             );
 
-            span.record("error", message.as_str());
+            span.record("error", "api_error");
             tracing::error!(
                 status = %status,
-                error_message = %message,
                 model_id = %model_id,
                 "responses API error"
             );
@@ -1487,8 +1479,11 @@ impl SamplingClient {
         // Drop process-local trace data.
         request.trace.take();
 
-        tracing::debug!("create_message: {:?}", &request.inner);
-        tracing::debug!("endpoint: {:?}", self.endpoint("messages"));
+        tracing::debug!(
+            model_id = %model_id,
+            endpoint = %self.endpoint("messages"),
+            "Creating messages request"
+        );
 
         let grok_headers = GrokRequestHeaders {
             conv_id: x_grok_conv_id,
@@ -1538,7 +1533,6 @@ impl SamplingClient {
             );
             tracing::warn!(
                 status = %status,
-                error_message = %message,
                 model_id = %model_id,
                 "messages API error"
             );
@@ -1553,10 +1547,9 @@ impl SamplingClient {
 
         let response_obj =
             serde_json::from_slice::<messages::MessagesResponse>(&bytes).map_err(|e| {
-                let raw_body = String::from_utf8_lossy(&bytes);
                 tracing::error!(
                     error = %e,
-                    raw_body = %raw_body,
+                    response_bytes = bytes.len(),
                     "Failed to deserialize MessagesResponse"
                 );
                 SamplingError::Serialization(e)
@@ -1670,10 +1663,9 @@ impl SamplingClient {
                 Some(&resp_headers),
             );
 
-            span.record("error", message.as_str());
+            span.record("error", "api_error");
             tracing::error!(
                 status = %status,
-                error_message = %message,
                 model_id = %model_id,
                 "messages API error"
             );
@@ -2043,6 +2035,31 @@ mod tests {
             doom_loop_recovery: None,
             header_injector: None,
         }
+    }
+
+    #[test]
+    fn sampler_source_does_not_log_credentials_or_payload_bodies() {
+        let client_source = include_str!("client.rs");
+        for forbidden in [
+            concat!("api_key", " = %api_key"),
+            concat!("auth_header", "_prefix"),
+            concat!("x_api_key", "_prefix"),
+            concat!("raw_body", " = %raw_body"),
+            concat!("create_response", ": {:?}"),
+            concat!("create_message", ": {:?}"),
+            concat!("error_message", " = %message"),
+        ] {
+            assert!(
+                !client_source.contains(forbidden),
+                "sampler client still logs sensitive material via {forbidden:?}"
+            );
+        }
+
+        let sampling_log_source = include_str!("sampling_log.rs");
+        assert!(
+            !sampling_log_source.contains(concat!("auth", "_prefix")),
+            "sampling spans must not retain authorization prefixes"
+        );
     }
 
     /// Verify the serialized shape of StreamingChatRequest matches the

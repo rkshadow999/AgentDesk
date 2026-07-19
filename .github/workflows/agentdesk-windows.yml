@@ -1,0 +1,1302 @@
+name: AgentDesk Windows CI
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.ref_type == 'tag' && format('agentdesk-tag-build-{0}', github.run_id) || format('agentdesk-{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  PROTOC_VERSION: "29.3"
+
+jobs:
+  linux-sidecar:
+    name: Linux ${{ matrix.architecture }} WSL sidecar
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            runner: ubuntu-22.04
+          - architecture: arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate public repository contract
+        shell: pwsh
+        run: ./scripts/agentdesk/Test-AgentDeskPublicRepository.ps1
+
+      - name: Check patch whitespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^ HEAD
+          else
+            git diff --check
+          fi
+
+      - name: Install Rust 1.92
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: 1.92.0
+          components: rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          key: agentdesk-linux-${{ matrix.architecture }}
+          cache-on-failure: true
+
+      - name: Install sandbox test prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+
+      - name: Check AgentDesk Rust formatting
+        # The untouched xai-grok-pager package has pre-existing rustfmt drift.
+        run: >-
+          cargo fmt
+          --package xai-proto-build
+          --package xai-grok-pager-bin
+          --package xai-grok-sandbox
+          --package xai-grok-shell
+          -- --check
+
+      - name: Install protoc 29.3
+        shell: pwsh
+        run: ./scripts/agentdesk/Install-Protoc.ps1 -Version $env:PROTOC_VERSION -Destination "$env:RUNNER_TEMP/protoc"
+
+      - name: Test protobuf build helper
+        run: cargo test --locked -p xai-proto-build
+
+      - name: Test AgentDesk memory
+        if: matrix.architecture == 'x64'
+        run: cargo test --locked -p xai-grok-memory
+
+      - name: Test enforced Linux sandbox
+        run: SANDBOX_E2E_REQUIRE_ENFORCEMENT=1 cargo test --locked -p xai-grok-sandbox
+
+      - name: Test AgentDesk integration contract
+        run: cargo test --locked -p xai-grok-shell --test agentdesk_contract -- --test-threads=1
+
+      - name: Test AgentDesk session transfer
+        if: matrix.architecture == 'x64'
+        run: cargo test --locked -p xai-grok-shell --test agentdesk_session_transfer -- --test-threads=1
+
+      - name: Build Linux sidecar
+        run: cargo build --locked -p xai-grok-pager-bin --profile release-dist --features release-dist
+
+      - name: Test Linux strict health helper
+        run: python3 ./scripts/agentdesk/Test-AgentDeskLinuxStrictHealth.py
+
+      - name: Verify Linux strict health remains fail-closed
+        run: >-
+          python3
+          ./scripts/agentdesk/Verify-AgentDeskLinuxStrictHealth.py
+          ./target/release-dist/xai-grok-pager
+
+      - name: Verify Linux sidecar compatibility
+        shell: bash
+        run: |
+          bash ./scripts/agentdesk/Verify-AgentDeskLinuxBinary.sh \
+            target/release-dist/xai-grok-pager \
+            "${{ matrix.architecture }}" \
+            2.35 \
+            target/release-dist/RUNTIME-COMPATIBILITY.txt
+
+      - name: Stage Linux sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/linux-sidecar
+          install -m 0755 target/release-dist/xai-grok-pager artifacts/linux-sidecar/agentdesk-engine
+          cp LICENSE THIRD-PARTY-NOTICES desktop/THIRD-PARTY-SOURCE-NOTICE.md artifacts/linux-sidecar/
+          cp target/release-dist/RUNTIME-COMPATIBILITY.txt artifacts/linux-sidecar/
+          printf 'Repository: https://github.com/%s\nRevision: %s\n' "${GITHUB_REPOSITORY}" "${GITHUB_SHA}" > artifacts/linux-sidecar/SOURCE-REVISION.txt
+
+      - name: Prepare Linux SBOM output
+        shell: bash
+        run: mkdir -p artifacts/sbom
+
+      - name: Generate Linux SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: artifacts/linux-sidecar
+          format: spdx-json
+          output-file: artifacts/sbom/SBOM.spdx.json
+          upload-artifact: false
+
+      - name: Generate Linux CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: artifacts/linux-sidecar
+          format: cyclonedx-json
+          output-file: artifacts/sbom/SBOM.cyclonedx.json
+          upload-artifact: false
+
+      - name: Archive Linux sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp artifacts/sbom/SBOM.*.json artifacts/linux-sidecar/
+          tar -C artifacts/linux-sidecar -czf artifacts/agentdesk-engine-linux-${{ matrix.architecture }}.tar.gz .
+          (cd artifacts && sha256sum agentdesk-engine-linux-${{ matrix.architecture }}.tar.gz > agentdesk-engine-linux-${{ matrix.architecture }}.tar.gz.sha256)
+
+      - name: Upload Linux sidecar
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: agentdesk-engine-linux-${{ matrix.architecture }}
+          path: |
+            artifacts/linux-sidecar
+            artifacts/agentdesk-engine-linux-${{ matrix.architecture }}.tar.gz
+            artifacts/agentdesk-engine-linux-${{ matrix.architecture }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  cloud-tests:
+    name: Self-hosted cloud integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Test optional self-hosted cloud
+        run: dotnet test ./cloud/tests/AgentDesk.Cloud.Tests/AgentDesk.Cloud.Tests.csproj --configuration Release
+
+  cloud-maintenance:
+    name: Cloud backup, restore, and rollback E2E
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Restore Cloud dependencies
+        run: dotnet restore ./cloud/src/AgentDesk.Cloud/AgentDesk.Cloud.csproj
+
+      - name: Test offline Cloud database maintenance
+        shell: pwsh
+        run: ./scripts/agentdesk/Test-AgentDeskCloudDatabaseMaintenance.ps1
+
+  windows-build:
+    name: Windows ${{ matrix.architecture }}
+    needs: linux-sidecar
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            platform: x64
+            runtime: win-x64
+            runner: windows-2025
+          - architecture: arm64
+            platform: ARM64
+            runtime: win-arm64
+            runner: windows-11-arm
+    env:
+      SIGN_MSIX: ${{ github.event_name == 'push' && github.ref_type == 'tag' && secrets.AGENTDESK_MSIX_PFX_BASE64 != '' && secrets.AGENTDESK_MSIX_PFX_PASSWORD != '' }}
+      TRUSTED_MSIX_SIGNER_THUMBPRINT: ${{ vars.AGENTDESK_MSIX_SIGNER_THUMBPRINT }}
+    steps:
+      - name: Require signing credentials for tag releases
+        if: github.event_name == 'push' && github.ref_type == 'tag' && env.SIGN_MSIX != 'true'
+        shell: pwsh
+        run: throw "Tag releases require both AGENTDESK_MSIX_PFX_BASE64 and AGENTDESK_MSIX_PFX_PASSWORD; refusing to publish unsigned MSIX packages."
+
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate public repository contract
+        shell: pwsh
+        run: ./scripts/agentdesk/Test-AgentDeskPublicRepository.ps1
+
+      - name: Set up Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/web/package-lock.json
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Install Rust 1.92
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: 1.92.0
+          components: rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          key: agentdesk-windows-${{ matrix.architecture }}
+          cache-on-failure: true
+
+      - name: Download Linux WSL sidecar
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: agentdesk-engine-linux-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/agentdesk-wsl-sidecar
+
+      - name: Validate PowerShell release scripts
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem ./scripts/agentdesk -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error "$($_.Extent.File):$($_.Extent.StartLineNumber): $($_.Message)" }
+              $failed = $true
+            }
+            Get-Help $_.FullName -Full | Out-Null
+          }
+          if ($failed) { throw "PowerShell release script validation failed." }
+          [xml](Get-Content ./scripts/agentdesk/AgentDesk.Packaging.targets -Raw) | Out-Null
+          ./scripts/agentdesk/Test-AgentDeskReleaseScripts.ps1
+          ./scripts/agentdesk/Build-AgentDeskPackage.ps1 `
+            -Architecture "${{ matrix.architecture }}" `
+            -Mode All `
+            -NativeEnginePath ./target/release-dist/xai-grok-pager.exe `
+            -WslEnginePath ./artifacts/wsl/agentdesk-engine `
+            -OutputRoot ./artifacts/dry-run `
+            -DryRun | Out-Null
+          ./scripts/agentdesk/Finalize-AgentDeskPackage.ps1 `
+            -Architecture "${{ matrix.architecture }}" `
+            -PackageInputRoot "./artifacts/dry-run/package-input-${{ matrix.architecture }}" `
+            -OutputRoot ./artifacts/dry-run/release `
+            -DryRun | Out-Null
+
+      - name: Install protoc 29.3
+        shell: pwsh
+        run: ./scripts/agentdesk/Install-Protoc.ps1 -Version $env:PROTOC_VERSION -Destination "$env:RUNNER_TEMP/protoc"
+
+      - name: Install Web dependencies
+        working-directory: desktop/web
+        run: npm ci
+
+      - name: Test WebView2 CDP smoke helpers
+        run: node ./scripts/agentdesk/Test-AgentDeskWebViewCdp.test.mjs
+
+      - name: Verify generated desktop notices
+        shell: pwsh
+        run: |
+          dotnet restore ./desktop/src/AgentDesk.App/AgentDesk.App.csproj
+          if ($LASTEXITCODE -ne 0) { throw "AgentDesk desktop restore failed." }
+          ./scripts/agentdesk/Generate-AgentDeskThirdPartyNotices.ps1
+          git diff --exit-code -- desktop/THIRD-PARTY-NOTICES.md
+          if ($LASTEXITCODE -ne 0) { throw "Desktop third-party notices are stale; regenerate and commit them." }
+
+      - name: Verify .NET formatting
+        if: matrix.architecture == 'x64'
+        shell: pwsh
+        run: |
+          dotnet restore desktop/AgentDesk.sln
+          if ($LASTEXITCODE -ne 0) { throw "AgentDesk solution restore failed before format verification." }
+          dotnet format desktop/AgentDesk.sln --verify-no-changes --no-restore
+          if ($LASTEXITCODE -ne 0) { throw "AgentDesk .NET formatting verification failed." }
+
+      - name: Verify Cloud formatting on Windows x64
+        if: matrix.architecture == 'x64'
+        shell: pwsh
+        run: |
+          Remove-Item Env:GROK_THIRD_PARTY_API_KEY -ErrorAction SilentlyContinue
+          dotnet restore ./cloud/tests/AgentDesk.Cloud.Tests/AgentDesk.Cloud.Tests.csproj
+          if ($LASTEXITCODE -ne 0) { throw "AgentDesk Cloud restore failed before format verification." }
+          dotnet format ./cloud/src/AgentDesk.Cloud/AgentDesk.Cloud.csproj --verify-no-changes --no-restore
+          if ($LASTEXITCODE -ne 0) { throw "AgentDesk Cloud server formatting verification failed." }
+          dotnet format ./cloud/tests/AgentDesk.Cloud.Tests/AgentDesk.Cloud.Tests.csproj --verify-no-changes --no-restore
+          if ($LASTEXITCODE -ne 0) { throw "AgentDesk Cloud formatting verification failed." }
+
+      - name: Test Web surfaces
+        working-directory: desktop/web
+        run: npm test
+
+      - name: Build Web surfaces
+        working-directory: desktop/web
+        run: npm run build
+
+      - name: Test .NET projects
+        shell: pwsh
+        run: |
+          Get-ChildItem ./desktop/tests -Recurse -Filter *.csproj | Sort-Object FullName | ForEach-Object {
+            dotnet test $_.FullName --configuration Release --runtime "${{ matrix.runtime }}" -p:Platform="${{ matrix.platform }}"
+            if ($LASTEXITCODE -ne 0) { throw "dotnet test failed for $($_.FullName)" }
+          }
+
+      - name: Test Cloud on Windows x64
+        if: matrix.architecture == 'x64'
+        shell: pwsh
+        run: |
+          Remove-Item Env:GROK_THIRD_PARTY_API_KEY -ErrorAction SilentlyContinue
+          dotnet test ./cloud/tests/AgentDesk.Cloud.Tests/AgentDesk.Cloud.Tests.csproj --configuration Release
+          if ($LASTEXITCODE -ne 0) { throw "AgentDesk Cloud tests failed on Windows x64." }
+
+      - name: Test protobuf build helper
+        run: cargo test --locked -p xai-proto-build
+
+      - name: Test AgentDesk integration contract
+        shell: pwsh
+        run: |
+          cargo test --locked -p xai-grok-shell --test agentdesk_contract -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw "AgentDesk contract tests failed." }
+
+      - name: Test AgentDesk memory on Windows x64
+        if: matrix.architecture == 'x64'
+        shell: pwsh
+        run: |
+          Remove-Item Env:GROK_THIRD_PARTY_API_KEY -ErrorAction SilentlyContinue
+          cargo test --locked -p xai-grok-memory
+          if ($LASTEXITCODE -ne 0) { throw "AgentDesk memory tests failed on Windows x64." }
+
+      - name: Test AgentDesk session transfer on Windows x64
+        if: matrix.architecture == 'x64'
+        shell: pwsh
+        run: |
+          Remove-Item Env:GROK_THIRD_PARTY_API_KEY -ErrorAction SilentlyContinue
+          cargo test --locked -p xai-grok-shell --test agentdesk_session_transfer -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw "AgentDesk session-transfer tests failed on Windows x64." }
+
+      - name: Check pager library on Windows x64
+        if: matrix.architecture == 'x64'
+        shell: pwsh
+        run: |
+          Remove-Item Env:GROK_THIRD_PARTY_API_KEY -ErrorAction SilentlyContinue
+          cargo check --locked -p xai-grok-pager --lib
+          if ($LASTEXITCODE -ne 0) { throw "AgentDesk pager library check failed on Windows x64." }
+
+      - name: Build native Windows sidecar
+        run: cargo build --locked -p xai-grok-pager-bin --profile release-dist --features release-dist
+
+      - name: Test native Windows sidecar ACP lifecycle
+        shell: pwsh
+        run: |
+          $env:GROK_BINARY = (Resolve-Path ./target/release-dist/xai-grok-pager.exe).Path
+          cargo test --locked `
+            -p xai-grok-shell `
+            --test test_built_binary_e2e `
+            test_windows_agentdesk_stdio_lifecycle_and_clean_shutdown `
+            -- --ignored --exact --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw "Native Windows sidecar ACP lifecycle test failed." }
+
+      - name: Decode tag signing certificate
+        if: env.SIGN_MSIX == 'true'
+        shell: pwsh
+        env:
+          PFX_BASE64: ${{ secrets.AGENTDESK_MSIX_PFX_BASE64 }}
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP "agentdesk-signing.pfx"
+          [System.IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:PFX_BASE64))
+
+      - name: Build unsigned portable and MSIX package inputs
+        if: env.SIGN_MSIX != 'true' && (github.event_name != 'push' || github.ref_type != 'tag')
+        shell: pwsh
+        run: |
+          $wslEngine = Get-ChildItem "$env:RUNNER_TEMP/agentdesk-wsl-sidecar" -Recurse -File -Filter agentdesk-engine | Select-Object -First 1
+          if (-not $wslEngine) { throw "Downloaded Linux sidecar is missing." }
+          $version = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME.Substring(1) } else { "0.1.0-ci.$env:GITHUB_RUN_NUMBER" }
+          ./scripts/agentdesk/Build-AgentDeskPackage.ps1 `
+            -Architecture "${{ matrix.architecture }}" `
+            -Mode All `
+            -Version $version `
+            -NativeEnginePath "./target/release-dist/xai-grok-pager.exe" `
+            -WslEnginePath $wslEngine.FullName `
+            -OutputRoot "./artifacts/agentdesk" `
+            -SourceRepository "https://github.com/$env:GITHUB_REPOSITORY" `
+            -SourceRevision $env:GITHUB_SHA
+
+      - name: Build signed portable and MSIX package inputs
+        if: env.SIGN_MSIX == 'true'
+        shell: pwsh
+        env:
+          PFX_PASSWORD: ${{ secrets.AGENTDESK_MSIX_PFX_PASSWORD }}
+        run: |
+          $wslEngine = Get-ChildItem "$env:RUNNER_TEMP/agentdesk-wsl-sidecar" -Recurse -File -Filter agentdesk-engine | Select-Object -First 1
+          if (-not $wslEngine) { throw "Downloaded Linux sidecar is missing." }
+          $version = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME.Substring(1) } else { "0.1.0-ci.$env:GITHUB_RUN_NUMBER" }
+          $parameters = @{
+            Architecture = "${{ matrix.architecture }}"
+            Mode = "All"
+            Version = $version
+            NativeEnginePath = "./target/release-dist/xai-grok-pager.exe"
+            WslEnginePath = $wslEngine.FullName
+            OutputRoot = "./artifacts/agentdesk"
+            SourceRepository = "https://github.com/$env:GITHUB_REPOSITORY"
+            SourceRevision = $env:GITHUB_SHA
+            CertificatePath = (Join-Path $env:RUNNER_TEMP "agentdesk-signing.pfx")
+            CertificatePassword = $env:PFX_PASSWORD
+          }
+          if (-not [string]::IsNullOrWhiteSpace($env:TRUSTED_MSIX_SIGNER_THUMBPRINT)) {
+            $parameters.ExpectedSignerThumbprint = $env:TRUSTED_MSIX_SIGNER_THUMBPRINT
+          }
+          ./scripts/agentdesk/Build-AgentDeskPackage.ps1 @parameters
+
+      - name: Smoke-test packaged WebView2 surfaces over CDP
+        shell: pwsh
+        run: |
+          $portableApp = Join-Path $PWD "artifacts/agentdesk/package-input-${{ matrix.architecture }}/portable/AgentDesk.App.exe"
+          if (-not (Test-Path -LiteralPath $portableApp -PathType Leaf)) {
+            throw "The ${{ matrix.architecture }} portable AgentDesk.App.exe was not produced for the WebView2 CDP smoke test."
+          }
+          $launcherOutput = Join-Path $PWD "artifacts/agentdesk/cdp-launcher-${{ matrix.architecture }}"
+          dotnet publish ./desktop/tools/AgentDesk.ProcessJobLauncher/AgentDesk.ProcessJobLauncher.csproj `
+            --configuration Release `
+            --runtime "${{ matrix.runtime }}" `
+            --self-contained true `
+            --output $launcherOutput `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:DebugSymbols=false `
+            -p:DebugType=None
+          if ($LASTEXITCODE -ne 0) { throw "The WebView2 Job Object launcher publish failed." }
+          $jobLauncher = Join-Path $launcherOutput "AgentDesk.ProcessJobLauncher.exe"
+          if (-not (Test-Path -LiteralPath $jobLauncher -PathType Leaf)) {
+            throw "The ${{ matrix.architecture }} WebView2 Job Object launcher was not produced."
+          }
+          node ./scripts/agentdesk/Test-AgentDeskWebViewCdp.mjs `
+            --launcher $jobLauncher `
+            --executable $portableApp `
+            --timeout-ms 90000
+
+      - name: Remove signing certificate
+        if: always()
+        shell: pwsh
+        run: Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "agentdesk-signing.pfx") -Force -ErrorAction SilentlyContinue
+
+      - name: Verify packaged dependency closure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          try {
+            $packageInputRoot = "./artifacts/agentdesk/package-input-${{ matrix.architecture }}"
+            $portableDepsFile = "./artifacts/agentdesk/package-input-${{ matrix.architecture }}/portable/AgentDesk.App.deps.json"
+            if (-not (Test-Path -LiteralPath $portableDepsFile -PathType Leaf)) {
+              throw "Portable package is missing AgentDesk.App.deps.json."
+            }
+
+            $msixFiles = @(Get-ChildItem -LiteralPath "$packageInputRoot/msix" -File -Filter "*.msix")
+            if ($msixFiles.Count -ne 1) {
+              throw "Expected exactly one stable MSIX package, found $($msixFiles.Count)."
+            }
+            $msixDepsFile = Join-Path $env:RUNNER_TEMP "agentdesk-${{ matrix.architecture }}-msix.deps.json"
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $msixArchive = [System.IO.Compression.ZipFile]::OpenRead($msixFiles[0].FullName)
+            try {
+              $depsEntry = $msixArchive.GetEntry("AgentDesk.App.deps.json")
+              if (-not $depsEntry) {
+                throw "MSIX package is missing AgentDesk.App.deps.json."
+              }
+              [System.IO.Compression.ZipFileExtensions]::ExtractToFile($depsEntry, $msixDepsFile, $true)
+            }
+            finally {
+              $msixArchive.Dispose()
+            }
+
+            dotnet restore ./desktop/src/AgentDesk.App/AgentDesk.App.csproj
+            if ($LASTEXITCODE -ne 0) { throw "AgentDesk dual-runtime restore failed after packaging." }
+            $publishedDepsFiles = @($portableDepsFile, $msixDepsFile)
+            ./scripts/agentdesk/Generate-AgentDeskThirdPartyNotices.ps1 `
+              -PublishedDepsFile $publishedDepsFiles
+            git diff --exit-code -- desktop/THIRD-PARTY-NOTICES.md
+            if ($LASTEXITCODE -ne 0) { throw "Packaged dependency closure verification failed." }
+          }
+          catch {
+            throw "Packaged dependency closure verification failed. $($_.Exception.Message)"
+          }
+
+      - name: Upload package inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: AgentDesk-package-input-${{ matrix.architecture }}
+          path: artifacts/agentdesk/package-input-${{ matrix.architecture }}
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble-release:
+    name: Assemble ${{ matrix.architecture }} release
+    needs: windows-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture:
+          - x64
+          - arm64
+    steps:
+      - name: Check out release scripts
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download package input
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: AgentDesk-package-input-${{ matrix.architecture }}
+          path: artifacts/input
+
+      - name: Prepare SBOM output
+        shell: bash
+        run: mkdir -p artifacts/sbom
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: artifacts/input
+          format: spdx-json
+          output-file: artifacts/sbom/SBOM.spdx.json
+          upload-artifact: false
+
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: artifacts/input
+          format: cyclonedx-json
+          output-file: artifacts/sbom/SBOM.cyclonedx.json
+          upload-artifact: false
+
+      - name: Add SBOMs to portable package
+        shell: bash
+        run: cp artifacts/sbom/SBOM.*.json artifacts/input/portable/
+
+      - name: Create archives and checksums
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME.Substring(1) } else { "0.1.0-ci.$env:GITHUB_RUN_NUMBER" }
+          ./scripts/agentdesk/Finalize-AgentDeskPackage.ps1 `
+            -Architecture "${{ matrix.architecture }}" `
+            -Version $version `
+            -PackageInputRoot "./artifacts/input" `
+            -OutputRoot "./artifacts/release"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: AgentDesk-release-${{ matrix.architecture }}
+          path: artifacts/release/AgentDesk-*-win-${{ matrix.architecture }}
+          if-no-files-found: error
+          retention-days: 14
+
+  github-release:
+    name: Publish tag release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs:
+      - linux-sidecar
+      - assemble-release
+      - cloud-tests
+      - cloud-maintenance
+    runs-on: windows-2025
+    timeout-minutes: 360
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Wait for earlier tag workflows
+        timeout-minutes: 240
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          Remove-Item Env:GROK_THIRD_PARTY_API_KEY -ErrorAction SilentlyContinue
+          $ErrorActionPreference = "Stop"
+          [long]$currentRunNumber = 0
+          if (-not [long]::TryParse($env:GITHUB_RUN_NUMBER, [ref]$currentRunNumber)) {
+            throw "GITHUB_RUN_NUMBER is invalid; unable to order AgentDesk tag workflows."
+          }
+          $tagRunCache = @{}
+          function Test-IsAgentDeskTagRun {
+            param([Parameter(Mandatory)][object]$Run)
+
+            $cacheKey = [string]$Run.databaseId
+            if ($tagRunCache.ContainsKey($cacheKey)) {
+              return [bool]$tagRunCache[$cacheKey]
+            }
+            $tagName = [string]$Run.headBranch
+            if ($tagName -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(ci|alpha|beta|preview|rc)\.(0|[1-9]\d*))?$') {
+              $tagRunCache[$cacheKey] = $false
+              return $false
+            }
+
+            $escapedTagName = [System.Uri]::EscapeDataString($tagName)
+            $tagRefsJson = gh api "repos/$env:GITHUB_REPOSITORY/git/matching-refs/tags/$escapedTagName?per_page=100"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to resolve the remote ref for earlier workflow run #$($Run.number)."
+            }
+            $exactTagRefs = @($tagRefsJson | ConvertFrom-Json |
+              Where-Object { $_.ref -ceq "refs/tags/$tagName" })
+            if ($exactTagRefs.Count -eq 0) {
+              $tagRunCache[$cacheKey] = $false
+              return $false
+            }
+            if ($exactTagRefs.Count -ne 1) {
+              throw "The remote tag ref for earlier workflow run #$($Run.number) is ambiguous."
+            }
+
+            $objectType = [string]$exactTagRefs[0].object.type
+            $objectSha = [string]$exactTagRefs[0].object.sha
+            for ($depth = 0; $depth -lt 8 -and $objectType -ceq "tag"; $depth++) {
+              $tagObjectJson = gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$objectSha"
+              if ($LASTEXITCODE -ne 0) {
+                throw "Unable to peel the remote tag for earlier workflow run #$($Run.number)."
+              }
+              $tagObject = $tagObjectJson | ConvertFrom-Json
+              $objectType = [string]$tagObject.object.type
+              $objectSha = [string]$tagObject.object.sha
+            }
+            if ($objectType -cne "commit") {
+              throw "The remote tag for earlier workflow run #$($Run.number) does not resolve to a commit."
+            }
+
+            $isTagRun = [System.String]::Equals(
+              $objectSha,
+              [string]$Run.headSha,
+              [System.StringComparison]::OrdinalIgnoreCase)
+            $tagRunCache[$cacheKey] = $isTagRun
+            return $isTagRun
+          }
+
+          $deadline = [DateTimeOffset]::UtcNow.AddMinutes(230)
+          while ($true) {
+            $runsJson = gh run list `
+              --workflow agentdesk-windows.yml `
+              --event push `
+              --limit 1000 `
+              --json number,headBranch,headSha,status,conclusion,event,databaseId
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to query earlier AgentDesk tag workflows."
+            }
+            $workflowRuns = @($runsJson | ConvertFrom-Json)
+
+            $earlierTagRuns = @($workflowRuns |
+              Where-Object {
+                $_.number -lt $currentRunNumber -and
+                $_.event -ceq "push" -and
+                $_.headBranch -match '^v' -and
+                (Test-IsAgentDeskTagRun -Run $_)
+              })
+            $failedEarlierRuns = @($earlierTagRuns |
+              Where-Object {
+                $_.status -eq "completed" -and
+                $_.conclusion -cne "success"
+              } |
+              Sort-Object number)
+            if ($failedEarlierRuns.Count -gt 0) {
+              $failed = $failedEarlierRuns[0]
+              throw "Earlier AgentDesk tag workflow #$($failed.number) ($($failed.headBranch)) completed as '$($failed.conclusion)'. Rerun it successfully or explicitly abandon it through a documented incident and delete workflow run $($failed.databaseId) before publishing a later tag."
+            }
+
+            $blockingRuns = @($earlierTagRuns |
+              Where-Object { $_.status -ne "completed" } |
+              Sort-Object number)
+            if ($blockingRuns.Count -eq 0) {
+              break
+            }
+            if ([DateTimeOffset]::UtcNow -ge $deadline) {
+              $blockingSummary = $blockingRuns |
+                ForEach-Object { "#$($_.number) $($_.headBranch) [$($_.status)]" }
+              throw "Timed out waiting for earlier AgentDesk tag workflows: $($blockingSummary -join ', ')."
+            }
+
+            $oldest = $blockingRuns[0]
+            Write-Host "Waiting for earlier AgentDesk tag workflow #$($oldest.number) ($($oldest.headBranch), $($oldest.status))."
+            Start-Sleep -Seconds 30
+          }
+
+      - name: Check out release scripts
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Require tag commit on origin/main
+        shell: pwsh
+        run: |
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ($LASTEXITCODE -ne 0) { throw "Unable to fetch origin/main for tag reachability verification." }
+          $tagCommit = (& git rev-parse "$($env:GITHUB_SHA)^{commit}").Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tagCommit)) {
+            throw "Unable to resolve the tag commit."
+          }
+          git merge-base --is-ancestor $tagCommit origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Refusing to publish a tag whose commit is not reachable from origin/main."
+          }
+
+      - name: Download Windows release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: AgentDesk-release-*
+          path: artifacts/release
+          merge-multiple: true
+
+      - name: Download Linux WSL sidecar artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: agentdesk-engine-linux-*
+          path: artifacts/linux-sidecars
+
+      - name: Create signed update manifest
+        shell: pwsh
+        env:
+          UPDATE_PRIVATE_KEY_PKCS8_BASE64: ${{ secrets.AGENTDESK_UPDATE_ECDSA_PRIVATE_KEY_PKCS8_BASE64 }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:UPDATE_PRIVATE_KEY_PKCS8_BASE64)) {
+            throw "Tag releases require the update signing private key; refusing to publish unsigned update metadata."
+          }
+
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          $x64Name = "AgentDesk-$version-win-x64-portable.zip"
+          $arm64Name = "AgentDesk-$version-win-arm64-portable.zip"
+          $x64UpdaterName = "AgentDesk-$version-win-x64-updater.zip"
+          $arm64UpdaterName = "AgentDesk-$version-win-arm64-updater.zip"
+          $x64Packages = @(Get-ChildItem ./artifacts/release -Recurse -File -Filter $x64Name)
+          $arm64Packages = @(Get-ChildItem ./artifacts/release -Recurse -File -Filter $arm64Name)
+          $x64Updaters = @(Get-ChildItem ./artifacts/release -Recurse -File -Filter $x64UpdaterName)
+          $arm64Updaters = @(Get-ChildItem ./artifacts/release -Recurse -File -Filter $arm64UpdaterName)
+          if ($x64Packages.Count -ne 1 -or
+              $arm64Packages.Count -ne 1 -or
+              $x64Updaters.Count -ne 1 -or
+              $arm64Updaters.Count -ne 1) {
+            throw "Signed update metadata requires exactly one portable archive and updater for each Windows architecture."
+          }
+
+          $publicKeyPath = Join-Path $env:RUNNER_TEMP "agentdesk-update-public-key.spki"
+          $pinnedPublicKeySource = "./desktop/update/AgentDesk-update-public-key.spki.base64"
+          if (-not (Test-Path -LiteralPath $pinnedPublicKeySource -PathType Leaf)) {
+            throw "The repository-pinned update public key is missing."
+          }
+          try {
+            [System.IO.File]::WriteAllBytes(
+              $publicKeyPath,
+              [Convert]::FromBase64String(
+                (Get-Content -LiteralPath $pinnedPublicKeySource -Raw).Trim()))
+            ./scripts/agentdesk/New-AgentDeskUpdateManifest.ps1 `
+              -Version $version `
+              -Repository $env:GITHUB_REPOSITORY `
+              -Tag $env:GITHUB_REF_NAME `
+              -X64PackagePath $x64Packages[0].FullName `
+              -Arm64PackagePath $arm64Packages[0].FullName `
+              -X64UpdaterPath $x64Updaters[0].FullName `
+              -Arm64UpdaterPath $arm64Updaters[0].FullName `
+              -PublicKeyPath $publicKeyPath `
+              -PrivateKeyEnvironmentVariable "UPDATE_PRIVATE_KEY_PKCS8_BASE64" `
+              -OutputDirectory ./artifacts/release | Out-Null
+
+            foreach ($requiredMetadata in @(
+              "AgentDesk-update-manifest.json",
+              "AgentDesk-update-manifest.json.sig",
+              "AgentDesk-updater-manifest.json",
+              "AgentDesk-updater-manifest.json.sig",
+              "AgentDesk-update-public-key.spki",
+              "AgentDesk-update-metadata-SHA256SUMS.txt"
+            )) {
+              if (-not (Test-Path -LiteralPath (Join-Path ./artifacts/release $requiredMetadata) -PathType Leaf)) {
+                throw "Signed update metadata is missing $requiredMetadata."
+              }
+            }
+
+            $statusFiles = @(Get-ChildItem ./artifacts/release -Recurse -File -Filter "AgentDesk-*-UPDATE-STATUS.txt")
+            if ($statusFiles.Count -ne 2) {
+              throw "Signed update publication requires one update status file for each Windows architecture."
+            }
+            $publicKeyFingerprint = (Get-FileHash -LiteralPath $publicKeyPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            foreach ($statusFile in $statusFiles) {
+              $statusMatch = [System.Text.RegularExpressions.Regex]::Match(
+                $statusFile.Name,
+                '^AgentDesk-(?<version>.+)-win-(?<architecture>x64|arm64)-UPDATE-STATUS\.txt$')
+              if (-not $statusMatch.Success -or $statusMatch.Groups["version"].Value -cne $version) {
+                throw "The update status file identity is invalid: $($statusFile.Name)"
+              }
+
+              $statusText = @(
+                "signed-update-metadata",
+                "Application manifest: AgentDesk-update-manifest.json",
+                "Updater manifest: AgentDesk-updater-manifest.json",
+                "Public key SPKI SHA-256: $publicKeyFingerprint"
+              ) -join "`n"
+              $statusTemporary = "$($statusFile.FullName).$([guid]::NewGuid().ToString('N')).tmp"
+              [System.IO.File]::WriteAllText(
+                $statusTemporary,
+                $statusText + "`n",
+                [System.Text.UTF8Encoding]::new($false))
+              Move-Item -LiteralPath $statusTemporary -Destination $statusFile.FullName -Force
+
+              # Recalculate architecture checksums after status promotion.
+              $architecture = $statusMatch.Groups["architecture"].Value
+              $checksumName = "AgentDesk-$version-win-$architecture-SHA256SUMS.txt"
+              $checksumFiles = @(Get-ChildItem ./artifacts/release -Recurse -File -Filter $checksumName)
+              if ($checksumFiles.Count -ne 1) {
+                throw "Expected exactly one architecture checksum file named $checksumName."
+              }
+              $checksumFile = $checksumFiles[0]
+              $checksumLines = foreach ($line in Get-Content -LiteralPath $checksumFile.FullName) {
+                $checksumMatch = [System.Text.RegularExpressions.Regex]::Match(
+                  $line,
+                  '^[0-9a-f]{64}  (?<name>[^/\\]+)$')
+                if (-not $checksumMatch.Success) {
+                  throw "Architecture checksum metadata is malformed: $($checksumFile.Name)"
+                }
+                $assetName = $checksumMatch.Groups["name"].Value
+                $assetPath = Join-Path $checksumFile.DirectoryName $assetName
+                if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf)) {
+                  throw "Architecture checksum asset is missing: $assetName"
+                }
+                $hash = (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                "$hash  $assetName"
+              }
+              $checksumTemporary = "$($checksumFile.FullName).$([guid]::NewGuid().ToString('N')).tmp"
+              [System.IO.File]::WriteAllLines(
+                $checksumTemporary,
+                [string[]]$checksumLines,
+                [System.Text.UTF8Encoding]::new($false))
+              Move-Item -LiteralPath $checksumTemporary -Destination $checksumFile.FullName -Force
+            }
+          }
+          finally {
+            Remove-Item -LiteralPath $publicKeyPath -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:UPDATE_PRIVATE_KEY_PKCS8_BASE64 -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload signed update metadata for feed publication
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: AgentDesk-signed-update-metadata
+          path: |
+            artifacts/release/AgentDesk-update-manifest.json
+            artifacts/release/AgentDesk-update-manifest.json.sig
+            artifacts/release/AgentDesk-updater-manifest.json
+            artifacts/release/AgentDesk-updater-manifest.json.sig
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Prepare verified previous-release rollback bundle
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PREVIOUS_MSIX_SIGNER_THUMBPRINT: ${{ vars.AGENTDESK_PREVIOUS_MSIX_SIGNER_THUMBPRINT }}
+          PREVIOUS_UPDATE_PUBLIC_KEY_SHA256: ${{ vars.AGENTDESK_PREVIOUS_UPDATE_PUBLIC_KEY_SHA256 }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $currentTag = $env:GITHUB_REF_NAME
+          $currentVersion = $currentTag.Substring(1)
+          function ConvertTo-AgentDeskReleaseVersion {
+            param([Parameter(Mandatory)][string]$Version)
+
+            $match = [System.Text.RegularExpressions.Regex]::Match(
+              $Version,
+              '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(ci|alpha|beta|preview|rc)\.(0|[1-9]\d*))?$')
+            if (-not $match.Success) { return $null }
+
+            $components = foreach ($groupIndex in 1..3) {
+              [uint64]$component = 0
+              if (-not [uint64]::TryParse($match.Groups[$groupIndex].Value, [ref]$component) -or
+                  $component -gt 65535) {
+                return $null
+              }
+              [int]$component
+            }
+            $revision = 65535
+            if ($match.Groups[4].Success) {
+              [uint64]$sequence = 0
+              if (-not [uint64]::TryParse($match.Groups[5].Value, [ref]$sequence) -or
+                  $sequence -gt 9999) {
+                return $null
+              }
+              $channelOffsets = @{
+                ci = 0
+                alpha = 10000
+                beta = 20000
+                preview = 30000
+                rc = 40000
+              }
+              $revision = $channelOffsets[$match.Groups[4].Value] + [int]$sequence
+            }
+            return [Version]::new($components[0], $components[1], $components[2], $revision)
+          }
+
+          $currentComparableVersion = ConvertTo-AgentDeskReleaseVersion -Version $currentVersion
+          if ($null -eq $currentComparableVersion) {
+            throw "Current release tag is not a supported AgentDesk version."
+          }
+          $rollbackRoot = Join-Path $PWD "artifacts/rollback"
+          [System.IO.Directory]::CreateDirectory($rollbackRoot) | Out-Null
+
+          $releaseJson = gh release list --limit 1000 --exclude-drafts --json tagName
+          if ($LASTEXITCODE -ne 0) { throw "Unable to enumerate previous GitHub Releases." }
+          $publishedReleases = foreach ($release in @($releaseJson | ConvertFrom-Json)) {
+            $candidateTag = [string]$release.tagName
+            if ($candidateTag -ceq $currentTag -or -not $candidateTag.StartsWith("v")) {
+              continue
+            }
+            $candidateVersion = ConvertTo-AgentDeskReleaseVersion -Version $candidateTag.Substring(1)
+            if ($null -ne $candidateVersion) {
+              [pscustomobject]@{
+                TagName = $candidateTag
+                ComparableVersion = $candidateVersion
+              }
+            }
+          }
+          $blockingPublishedRelease = @($publishedReleases) |
+            Where-Object { $_.ComparableVersion -ge $currentComparableVersion } |
+            Sort-Object ComparableVersion |
+            Select-Object -First 1
+          if ($null -ne $blockingPublishedRelease) {
+            throw "Refusing to create an out-of-order AgentDesk Release because $($blockingPublishedRelease.TagName) is already published."
+          }
+          $previousRelease = @($publishedReleases) |
+            Where-Object { $_.ComparableVersion -lt $currentComparableVersion } |
+            Sort-Object ComparableVersion -Descending |
+            Select-Object -First 1
+
+          if ($null -eq $previousRelease) {
+            $markerName = "AgentDesk-$currentVersion-NO-PREVIOUS-ROLLBACK.txt"
+            [System.IO.File]::WriteAllText(
+              (Join-Path $rollbackRoot $markerName),
+              "This is the first published AgentDesk release; no previous signed release exists to bundle.`n",
+              [System.Text.UTF8Encoding]::new($false))
+            return
+          }
+
+          $previousTag = [string]$previousRelease.TagName
+          $previousVersion = $previousTag.Substring(1)
+          if ([string]::IsNullOrWhiteSpace($env:PREVIOUS_MSIX_SIGNER_THUMBPRINT)) {
+            throw "Tag rollback requires AGENTDESK_PREVIOUS_MSIX_SIGNER_THUMBPRINT for the immediately previous signed release."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:PREVIOUS_UPDATE_PUBLIC_KEY_SHA256)) {
+            throw "Tag rollback requires AGENTDESK_PREVIOUS_UPDATE_PUBLIC_KEY_SHA256 for the immediately previous signed release."
+          }
+          $downloadRoot = Join-Path $PWD "artifacts/previous-release"
+          [System.IO.Directory]::CreateDirectory($downloadRoot) | Out-Null
+          gh release download $previousTag `
+            --dir $downloadRoot `
+            --pattern "AgentDesk-$previousVersion-win-x64*" `
+            --pattern "AgentDesk-$previousVersion-win-arm64*" `
+            --pattern "AgentDesk-update-manifest.json" `
+            --pattern "AgentDesk-update-manifest.json.sig" `
+            --pattern "AgentDesk-update-public-key.spki"
+          if ($LASTEXITCODE -ne 0) { throw "Unable to download the previous AgentDesk release assets." }
+
+          $previousMsixFiles = @(Get-ChildItem -LiteralPath $downloadRoot -File -Filter "*.msix")
+          if ($previousMsixFiles.Count -ne 2) {
+            throw "Expected one previous signed MSIX for each architecture, found $($previousMsixFiles.Count)."
+          }
+
+          ./scripts/agentdesk/New-AgentDeskRollbackBundle.ps1 `
+            -CurrentVersion $currentVersion `
+            -CurrentTag $currentTag `
+            -PreviousVersion $previousVersion `
+            -PreviousTag $previousTag `
+            -PreviousReleaseRoot $downloadRoot `
+            -OutputRoot $rollbackRoot `
+            -SourceRepository "https://github.com/$env:GITHUB_REPOSITORY" `
+            -PreviousUpdateManifestPath (Join-Path $downloadRoot "AgentDesk-update-manifest.json") `
+            -PreviousUpdateManifestSignaturePath (Join-Path $downloadRoot "AgentDesk-update-manifest.json.sig") `
+            -TrustedUpdatePublicKeyPath (Join-Path $downloadRoot "AgentDesk-update-public-key.spki") `
+            -ExpectedPreviousUpdatePublicKeySha256 $env:PREVIOUS_UPDATE_PUBLIC_KEY_SHA256 `
+            -ExpectedPreviousMsixSignerThumbprint $env:PREVIOUS_MSIX_SIGNER_THUMBPRINT `
+            -RequireSignedMsix | Out-Null
+
+      - name: Stage immutable GitHub Release draft
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $releaseTag = $env:GITHUB_REF_NAME
+          $releaseJson = gh release view $releaseTag --json isDraft 2>$null
+          $releaseExists = $LASTEXITCODE -eq 0
+          if ($releaseExists) {
+            $existingRelease = $releaseJson | ConvertFrom-Json
+            if (-not [bool]$existingRelease.isDraft) {
+              throw "Refusing to mutate an existing published AgentDesk GitHub Release."
+            }
+            gh release delete $releaseTag --yes
+            if ($LASTEXITCODE -ne 0) { throw "Unable to replace the incomplete draft Release." }
+          }
+
+          $version = $releaseTag.Substring(1)
+          $isPrerelease = [System.Text.RegularExpressions.Regex]::IsMatch(
+            $version,
+            '-(?:ci|alpha|beta|preview|rc)\.\d+$')
+          $createArguments = @(
+            $releaseTag,
+            "--verify-tag",
+            "--generate-notes",
+            "--title",
+            "AgentDesk $releaseTag",
+            "--draft"
+          )
+          if ($isPrerelease) {
+            $createArguments += "--prerelease"
+          }
+          & gh release create @createArguments
+          if ($LASTEXITCODE -ne 0) { throw "Unable to create the AgentDesk draft GitHub Release." }
+
+          $windowsFiles = @(Get-ChildItem ./artifacts/release -Recurse -File)
+          $linuxFiles = @(Get-ChildItem ./artifacts/linux-sidecars -Recurse -File |
+            Where-Object { $_.Name.EndsWith(".tar.gz") -or $_.Name.EndsWith(".sha256") })
+          $rollbackFiles = @(Get-ChildItem ./artifacts/rollback -Recurse -File)
+          $files = @($windowsFiles + $linuxFiles + $rollbackFiles | ForEach-Object FullName)
+          if ($files.Count -eq 0) { throw "No AgentDesk release files were assembled." }
+          & gh release upload $releaseTag @files
+          if ($LASTEXITCODE -ne 0) { throw "Unable to upload AgentDesk GitHub Release assets." }
+
+  publish-update-feed:
+    name: Publish signed update feeds
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: github-release
+    runs-on: windows-2025
+    permissions:
+      contents: write
+    steps:
+      - name: Check out fixed-feed verifier
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download signed update metadata
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: AgentDesk-signed-update-metadata
+          path: artifacts/update-feed
+
+      - name: Publish fixed signed update feeds
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PREVIOUS_UPDATE_PUBLIC_KEY_SHA256: ${{ vars.AGENTDESK_PREVIOUS_UPDATE_PUBLIC_KEY_SHA256 }}
+        run: |
+          Remove-Item Env:GROK_THIRD_PARTY_API_KEY -ErrorAction SilentlyContinue
+          $ErrorActionPreference = "Stop"
+          $tagMatch = [System.Text.RegularExpressions.Regex]::Match(
+            $env:GITHUB_REF_NAME,
+            '^v(?<version>(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(ci|alpha|beta|preview|rc)\.(0|[1-9]\d*))?)$')
+          if (-not $tagMatch.Success) {
+            throw "The fixed update feed requires a supported v-prefixed AgentDesk release tag."
+          }
+          $version = $tagMatch.Groups["version"].Value
+          $isPrerelease = [System.Text.RegularExpressions.Regex]::IsMatch(
+            $version,
+            '-(?:ci|alpha|beta|preview|rc)\.\d+$')
+          $metadataNames = @(
+            "AgentDesk-update-manifest.json",
+            "AgentDesk-update-manifest.json.sig",
+            "AgentDesk-updater-manifest.json",
+            "AgentDesk-updater-manifest.json.sig"
+          )
+          $metadataFiles = foreach ($metadataName in $metadataNames) {
+            $metadataPath = Join-Path ./artifacts/update-feed $metadataName
+            if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
+              throw "Signed update feed metadata is missing $metadataName."
+            }
+            (Get-Item -LiteralPath $metadataPath).FullName
+          }
+
+          $publicKeyPath = Join-Path $env:RUNNER_TEMP "agentdesk-update-public-key.spki"
+          $pinnedPublicKeySource = "./desktop/update/AgentDesk-update-public-key.spki.base64"
+          if (-not (Test-Path -LiteralPath $pinnedPublicKeySource -PathType Leaf)) {
+            throw "The repository-pinned update public key is missing."
+          }
+          [System.IO.File]::WriteAllBytes(
+            $publicKeyPath,
+            [Convert]::FromBase64String(
+              (Get-Content -LiteralPath $pinnedPublicKeySource -Raw).Trim()))
+          ./scripts/agentdesk/Confirm-AgentDeskUpdateFeedAdvance.ps1 `
+            -CandidateDirectory ./artifacts/update-feed `
+            -ExpectedCandidateVersion $version `
+            -TrustedPublicKeyPath $publicKeyPath | Out-Null
+
+          $feedTags = @("update-prerelease")
+          if (-not $isPrerelease) {
+            $feedTags += "update-stable"
+          }
+          $feedStates = [System.Collections.Generic.List[object]]::new()
+          foreach ($feedTag in $feedTags) {
+            $releaseJson = gh release view $feedTag --json isDraft,isPrerelease 2>$null
+            if ($LASTEXITCODE -eq 0) {
+              $feedRelease = $releaseJson | ConvertFrom-Json
+              if ([bool]$feedRelease.isDraft -or -not [bool]$feedRelease.isPrerelease) {
+                throw "The fixed update feed Release must be published as a prerelease."
+              }
+              $existingFeedRoot = Join-Path $env:RUNNER_TEMP "agentdesk-existing-feed-$feedTag"
+              [System.IO.Directory]::CreateDirectory($existingFeedRoot) | Out-Null
+              gh release download $feedTag `
+                --dir $existingFeedRoot `
+                --pattern "AgentDesk-update-manifest.json" `
+                --pattern "AgentDesk-update-manifest.json.sig" `
+                --pattern "AgentDesk-updater-manifest.json" `
+                --pattern "AgentDesk-updater-manifest.json.sig"
+              if ($LASTEXITCODE -ne 0) {
+                throw "Unable to download existing signed update metadata for $feedTag."
+              }
+
+              $validatedWithCurrentKey = $false
+              try {
+                ./scripts/agentdesk/Confirm-AgentDeskUpdateFeedAdvance.ps1 `
+                  -ExistingDirectory $existingFeedRoot `
+                  -CandidateDirectory ./artifacts/update-feed `
+                  -ExpectedCandidateVersion $version `
+                  -TrustedPublicKeyPath $publicKeyPath | Out-Null
+                $validatedWithCurrentKey = $true
+              }
+              catch {
+                if (-not $_.Exception.Message.Contains("signature is invalid") -or
+                    [string]::IsNullOrWhiteSpace($env:PREVIOUS_UPDATE_PUBLIC_KEY_SHA256)) {
+                  throw
+                }
+              }
+
+              if (-not $validatedWithCurrentKey) {
+                $untrustedExistingManifest = Get-Content `
+                  -LiteralPath (Join-Path $existingFeedRoot "AgentDesk-update-manifest.json") `
+                  -Raw | ConvertFrom-Json
+                $existingVersion = [string]$untrustedExistingManifest.version
+                if (-not [System.Text.RegularExpressions.Regex]::IsMatch(
+                    $existingVersion,
+                    '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(ci|alpha|beta|preview|rc)\.(0|[1-9]\d*))?$')) {
+                  throw "The existing fixed update feed version is invalid."
+                }
+                $previousKeyRoot = Join-Path $env:RUNNER_TEMP "agentdesk-previous-feed-key-$feedTag"
+                [System.IO.Directory]::CreateDirectory($previousKeyRoot) | Out-Null
+                gh release download "v$existingVersion" `
+                  --dir $previousKeyRoot `
+                  --pattern "AgentDesk-update-public-key.spki"
+                if ($LASTEXITCODE -ne 0) {
+                  throw "Unable to download the independently pinned previous update key for $feedTag."
+                }
+                $previousKeys = @(Get-ChildItem -LiteralPath $previousKeyRoot -File -Filter "AgentDesk-update-public-key.spki")
+                if ($previousKeys.Count -ne 1) {
+                  throw "Expected exactly one previous update public key for $feedTag."
+                }
+                $previousKeyHash = (Get-FileHash -LiteralPath $previousKeys[0].FullName -Algorithm SHA256).Hash
+                if (-not [System.String]::Equals(
+                    $previousKeyHash,
+                    $env:PREVIOUS_UPDATE_PUBLIC_KEY_SHA256,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                  throw "The previous update public key does not match AGENTDESK_PREVIOUS_UPDATE_PUBLIC_KEY_SHA256."
+                }
+                ./scripts/agentdesk/Confirm-AgentDeskUpdateFeedAdvance.ps1 `
+                  -ExistingDirectory $existingFeedRoot `
+                  -CandidateDirectory ./artifacts/update-feed `
+                  -ExpectedCandidateVersion $version `
+                  -TrustedPublicKeyPath $publicKeyPath `
+                  -PreviousTrustedPublicKeyPath $previousKeys[0].FullName | Out-Null
+              }
+              $feedStates.Add([pscustomobject]@{ Tag = $feedTag; Exists = $true })
+            }
+            else {
+              $feedStates.Add([pscustomobject]@{ Tag = $feedTag; Exists = $false })
+            }
+          }
+
+          foreach ($feedState in $feedStates) {
+            $feedTag = [string]$feedState.Tag
+            if (-not [bool]$feedState.Exists) {
+              $feedTitle = if ($feedTag -ceq "update-stable") {
+                "AgentDesk stable update feed"
+              }
+              else {
+                "AgentDesk prerelease update feed"
+              }
+              gh release create $feedTag `
+                --target $env:GITHUB_SHA `
+                --title $feedTitle `
+                --notes "Signed AgentDesk update metadata. Assets are mutable channel pointers; versioned Release assets remain immutable." `
+                --prerelease
+              if ($LASTEXITCODE -ne 0) {
+                throw "Unable to create the fixed update feed Release $feedTag."
+              }
+            }
+
+            gh release upload $feedTag @metadataFiles --clobber
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to publish the fixed update feed Release $feedTag."
+            }
+          }
+          Remove-Item -LiteralPath $publicKeyPath -Force -ErrorAction SilentlyContinue
+
+  finalize-github-release:
+    name: Publish verified immutable GitHub Release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: publish-update-feed
+    runs-on: windows-2025
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tag verification repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Publish versioned Release after signed feeds advance
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          Remove-Item Env:GROK_THIRD_PARTY_API_KEY -ErrorAction SilentlyContinue
+          $ErrorActionPreference = "Stop"
+          $releaseTag = $env:GITHUB_REF_NAME
+          if (-not [System.Text.RegularExpressions.Regex]::IsMatch(
+              $releaseTag,
+              '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(ci|alpha|beta|preview|rc)\.(0|[1-9]\d*))?$')) {
+            throw "The final publication job requires a supported AgentDesk release tag."
+          }
+          $releaseJson = gh release view $releaseTag --json isDraft
+          if ($LASTEXITCODE -ne 0) { throw "The staged AgentDesk GitHub Release is missing." }
+          $release = $releaseJson | ConvertFrom-Json
+          if (-not [bool]$release.isDraft) {
+            throw "Refusing to republish an AgentDesk GitHub Release that is no longer draft."
+          }
+
+          $verificationRef = "refs/agentdesk-release-verification/$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          git fetch --force --no-tags origin "+refs/tags/${releaseTag}:$verificationRef"
+          if ($LASTEXITCODE -ne 0) { throw "Unable to re-resolve the remote AgentDesk release tag." }
+          $remoteTagCommit = (& git rev-parse "$verificationRef^{commit}").Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              -not [System.String]::Equals(
+                $remoteTagCommit,
+                $env:GITHUB_SHA,
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "The remote AgentDesk release tag no longer resolves to GITHUB_SHA."
+          }
+          gh release edit $releaseTag --draft=false
+          if ($LASTEXITCODE -ne 0) { throw "Unable to publish the completed AgentDesk GitHub Release." }

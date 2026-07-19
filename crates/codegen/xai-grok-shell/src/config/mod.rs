@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 pub mod reloader;
 pub mod watcher;
 use crate::bundle;
@@ -1273,6 +1274,10 @@ pub fn apply_sandbox(
             xai_grok_sandbox::ProfileName::Off
         });
     xai_grok_sandbox::set_configured_profile(&resolved.value);
+    if let Err(error) = xai_grok_sandbox::validate_required_profile(&sandbox_profile) {
+        eprintln!("error: {error}; refusing to start.");
+        std::process::exit(1);
+    }
     let workspace = cwd
         .and_then(|p| dunce::canonicalize(p).ok())
         .or_else(|| std::env::current_dir().ok())
@@ -1316,7 +1321,19 @@ pub fn apply_sandbox(
         let is_custom = matches!(sandbox_profile, xai_grok_sandbox::ProfileName::Custom(_));
         let mut sandbox = xai_grok_sandbox::SandboxManager::new(sandbox_profile, &workspace);
         if let Err(e) = sandbox.apply(&workspace) {
+            if xai_grok_sandbox::enforcement_required() {
+                eprintln!(
+                    "error: sandbox enforcement is required; refusing to start without it: {e}"
+                );
+                std::process::exit(1);
+            }
             eprintln!("warning: sandbox could not be applied: {e}");
+        }
+        if xai_grok_sandbox::enforcement_required() && !sandbox.is_applied() {
+            eprintln!(
+                "error: sandbox enforcement is required but no OS sandbox became active; refusing to start."
+            );
+            std::process::exit(1);
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {

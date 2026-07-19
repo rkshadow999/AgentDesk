@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 use agent_client_protocol as acp;
 
 use crate::agent::config::ModelEntry;
@@ -29,11 +30,62 @@ pub const XAI_API_KEY_ENV_VAR: &str = "XAI_API_KEY";
 /// so existing deployments that use the old name keep working.
 pub const LEGACY_XAI_API_KEY_ENV_VAR: &str = "GROK_CODE_XAI_API_KEY";
 
-/// Read the API key from the environment.
+static CAPTURED_DESKTOP_API_KEY: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+
+fn captured_desktop_api_key() -> &'static std::sync::Mutex<Option<String>> {
+    CAPTURED_DESKTOP_API_KEY.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+pub(crate) fn set_captured_desktop_api_key(api_key: Option<String>) {
+    *captured_desktop_api_key()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = api_key;
+}
+
+/// Capture a desktop-managed API key before the process starts any threads.
 ///
-/// Checks `XAI_API_KEY` first, then falls back to the legacy
+/// When `GROK_DISABLE_API_KEY_PERSIST=1`, the preferred and legacy API-key
+/// variables are copied into process-local memory and then removed so no tool
+/// subprocess can inherit them.
+///
+/// # Safety
+///
+/// This must run before any runtime, hook, allocator helper, or background
+/// thread is created. Environment mutation is process-global and is not safe
+/// while another thread may read or write the environment.
+pub unsafe fn capture_desktop_api_key_before_runtime() -> std::io::Result<()> {
+    if !crate::auth::api_key_persistence_disabled() {
+        set_captured_desktop_api_key(None);
+        return Ok(());
+    }
+    let api_key = std::env::var(XAI_API_KEY_ENV_VAR)
+        .or_else(|_| std::env::var(LEGACY_XAI_API_KEY_ENV_VAR))
+        .ok();
+    crate::auth::clear_api_key(&crate::util::grok_home::grok_home())?;
+    set_captured_desktop_api_key(api_key);
+    // SAFETY: upheld by this function's caller contract.
+    unsafe {
+        std::env::remove_var(XAI_API_KEY_ENV_VAR);
+        std::env::remove_var(LEGACY_XAI_API_KEY_ENV_VAR);
+    }
+    Ok(())
+}
+
+/// Read the API key from the desktop memory slot or environment.
+///
+/// Desktop credential mode checks the startup-captured memory slot first.
+/// Otherwise, checks `XAI_API_KEY` and then falls back to the legacy
 /// `GROK_CODE_XAI_API_KEY` for backward compatibility.
 pub fn read_xai_api_key_env() -> Result<String, std::env::VarError> {
+    if crate::auth::api_key_persistence_disabled()
+        && let Some(api_key) = captured_desktop_api_key()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    {
+        return Ok(api_key);
+    }
     std::env::var(XAI_API_KEY_ENV_VAR).or_else(|_| std::env::var(LEGACY_XAI_API_KEY_ENV_VAR))
 }
 

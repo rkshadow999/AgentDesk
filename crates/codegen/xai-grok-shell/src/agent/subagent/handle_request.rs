@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 #![cfg_attr(rustfmt, rustfmt::skip)]
 #![allow(unused_imports)]
 use std::collections::HashMap;
@@ -154,6 +155,10 @@ pub(crate) async fn handle_subagent_request(
             .effort
             .map(|e| <&str>::from(e).to_string());
     }
+    if effective_runtime.capability_mode.is_none() {
+        effective_runtime.capability_mode = definition.capability_mode;
+    }
+    definition.capability_mode = effective_runtime.capability_mode;
     {
         use xai_tool_types::SubagentIsolationMode;
         if effective_runtime.isolation == SubagentIsolationMode::None
@@ -163,6 +168,13 @@ pub(crate) async fn handle_subagent_request(
             effective_runtime.isolation = SubagentIsolationMode::Worktree;
         }
     }
+    let agentdesk_worktree_mode = std::env::var(AGENTDESK_SUBAGENT_WORKTREE_MODE_ENV).ok();
+    let agentdesk_strict_worktree =
+        agentdesk_strict_worktree_required(agentdesk_worktree_mode.as_deref());
+    effective_runtime.isolation = resolve_agentdesk_subagent_isolation(
+        agentdesk_worktree_mode.as_deref(),
+        effective_runtime.isolation,
+    );
     let prompt = request.prompt.clone();
     if let Some(ref err) = effective_runtime.persona_error {
         tracing::error!(
@@ -242,10 +254,19 @@ pub(crate) async fn handle_subagent_request(
         send_failure(request, &error);
         return;
     }
+    let mut reused_worktree = false;
     let worktree_path = if let Some(ref source) = resume_source {
         if effective_runtime.isolation != xai_tool_types::SubagentIsolationMode::None
             && source.worktree_path.is_none()
         {
+            if agentdesk_worktree_failure_action(agentdesk_strict_worktree)
+                == AgentDeskWorktreeFailureAction::Abort
+            {
+                let msg = "AgentDesk strict worktree isolation could not restore the subagent workspace.";
+                pending_guard.set_error(msg.to_string());
+                send_failure(request, msg);
+                return;
+            }
             tracing::info!(
                 subagent_id = % request.id,
                 "Ignoring isolation=worktree override: resumed source had no worktree"
@@ -258,7 +279,28 @@ pub(crate) async fn handle_subagent_request(
                     dest.is_dir(),
                     source.snapshot_ref.as_deref(),
                 ) {
-                    ResumeWorktreeAction::Reuse => Some(dest.to_path_buf()),
+                    ResumeWorktreeAction::Reuse => {
+                        match resolve_agentdesk_reused_worktree(
+                            agentdesk_strict_worktree,
+                            dest,
+                            &ctx,
+                        ) {
+                            Ok(path) => {
+                                reused_worktree = true;
+                                Some(path)
+                            }
+                            Err(e) => {
+                                let msg = "AgentDesk strict worktree isolation could not restore the subagent workspace.";
+                                pending_guard.set_error(msg.to_string());
+                                tracing::warn!(
+                                    subagent_id = % request.id, worktree = % dest.display(), error = % e,
+                                    "Strict AgentDesk saved subagent worktree validation failed"
+                                );
+                                send_failure(request, msg);
+                                return;
+                            }
+                        }
+                    }
                     ResumeWorktreeAction::Rehydrate => {
                         let snapshot_ref = source
                             .snapshot_ref
@@ -282,6 +324,18 @@ pub(crate) async fn handle_subagent_request(
                                 Some(path)
                             }
                             Err(e) => {
+                                if agentdesk_worktree_failure_action(agentdesk_strict_worktree)
+                                    == AgentDeskWorktreeFailureAction::Abort
+                                {
+                                    let msg = "AgentDesk strict worktree isolation could not restore the subagent workspace.";
+                                    pending_guard.set_error(msg.to_string());
+                                    tracing::warn!(
+                                        subagent_id = % request.id, error = % e,
+                                        "Strict AgentDesk subagent worktree rehydration failed"
+                                    );
+                                    send_failure(request, msg);
+                                    return;
+                                }
                                 tracing::warn!(
                                     subagent_id = % request.id, error = % e,
                                     "Failed to rehydrate subagent worktree, falling back to shared workspace"
@@ -291,6 +345,14 @@ pub(crate) async fn handle_subagent_request(
                         }
                     }
                     ResumeWorktreeAction::Shared => {
+                        if agentdesk_worktree_failure_action(agentdesk_strict_worktree)
+                            == AgentDeskWorktreeFailureAction::Abort
+                        {
+                            let msg = "AgentDesk strict worktree isolation could not restore the subagent workspace.";
+                            pending_guard.set_error(msg.to_string());
+                            send_failure(request, msg);
+                            return;
+                        }
                         tracing::warn!(
                             subagent_id = % request.id, worktree = % dest.display(),
                             "Resumed subagent worktree dir missing with no snapshot; using shared workspace"
@@ -346,6 +408,18 @@ pub(crate) async fn handle_subagent_request(
                 Some(report.worktree_path)
             }
             Ok(Err(e)) => {
+                if agentdesk_worktree_failure_action(agentdesk_strict_worktree)
+                    == AgentDeskWorktreeFailureAction::Abort
+                {
+                    let msg = "AgentDesk strict worktree isolation could not create the subagent workspace.";
+                    pending_guard.set_error(msg.to_string());
+                    tracing::warn!(
+                        subagent_id = % request.id, error = % e,
+                        "Strict AgentDesk subagent worktree creation failed"
+                    );
+                    send_failure(request, msg);
+                    return;
+                }
                 tracing::warn!(
                     subagent_id = % request.id, error = % e,
                     "Failed to create worktree, falling back to shared workspace"
@@ -353,6 +427,18 @@ pub(crate) async fn handle_subagent_request(
                 None
             }
             Err(e) => {
+                if agentdesk_worktree_failure_action(agentdesk_strict_worktree)
+                    == AgentDeskWorktreeFailureAction::Abort
+                {
+                    let msg = "AgentDesk strict worktree isolation could not create the subagent workspace.";
+                    pending_guard.set_error(msg.to_string());
+                    tracing::warn!(
+                        subagent_id = % request.id, error = % e,
+                        "Strict AgentDesk subagent worktree creation task failed"
+                    );
+                    send_failure(request, msg);
+                    return;
+                }
                 tracing::warn!(
                     subagent_id = % request.id, error = % e,
                     "Worktree creation task panicked, falling back to shared workspace"
@@ -733,6 +819,35 @@ pub(crate) async fn handle_subagent_request(
         hunk_tracking: ctx.hunk_tracking_enabled && cwd_outside_parent,
         ..FsWatchCapabilities::none()
     };
+    if agentdesk_strict_worktree && reused_worktree {
+        let revalidation = worktree_path
+            .as_deref()
+            .ok_or_else(|| "strict reused worktree path disappeared".to_string())
+            .and_then(|path| resolve_agentdesk_reused_worktree(true, path, &ctx));
+        if let Err(e) = revalidation {
+            let msg = "AgentDesk strict worktree isolation could not restore the subagent workspace.";
+            pending_guard.set_error(msg.to_string());
+            tracing::warn!(
+                subagent_id = % request.id, error = % e,
+                "Strict AgentDesk saved subagent worktree final validation failed"
+            );
+            fail_subagent(
+                request,
+                msg,
+                &subagent_id,
+                &child_session_id,
+                &subagent_meta_dir,
+                gateway,
+                &ctx.parent_session_id,
+                ctx.parent_cmd_tx.as_ref(),
+                start.elapsed().as_millis() as u64,
+                &early_gcs_ctx,
+            );
+            return;
+        }
+        // This narrows but cannot eliminate a malicious same-account filesystem race.
+        // A Git worktree is not an operating-system sandbox.
+    }
     let child_cwd_abs = xai_grok_paths::AbsPathBuf::new(child_cwd)
         .unwrap_or_else(|_| {
             xai_grok_paths::AbsPathBuf::new(std::env::current_dir().unwrap_or_default())

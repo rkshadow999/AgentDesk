@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Git-based plugin installation.
 //!
 //! Handles cloning repos, copying local directories into the managed
@@ -164,6 +165,19 @@ pub fn install_from_source(
     source: &InstallSource,
     registry: &InstallRegistry,
 ) -> Result<InstallResult, InstallError> {
+    install_from_source_with_prepare(source, registry, |_| Ok(()))
+}
+
+/// Install a plugin source after allowing the copied checkout to be prepared
+/// before plugin discovery runs.
+pub fn install_from_source_with_prepare<F>(
+    source: &InstallSource,
+    registry: &InstallRegistry,
+    prepare: F,
+) -> Result<InstallResult, InstallError>
+where
+    F: FnOnce(&Path) -> Result<(), InstallError>,
+{
     let source_id = repo_source_id(source);
     let repo_key = InstallRegistry::repo_key(&source_id);
 
@@ -217,6 +231,11 @@ pub fn install_from_source(
             (kind, None)
         }
     };
+
+    if let Err(error) = prepare(&repo_path) {
+        let _ = remove_repo_path(&repo_path);
+        return Err(error);
+    }
 
     // Discover plugins
     let subdir = match source {

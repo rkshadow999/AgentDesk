@@ -375,4 +375,4 @@ git diff --check
 git push -u origin feature/agentdesk-beta-plan-mode
 ```
 
-预期：分支出现在 `rkshadow/AgentDesk` 并触发 CI；CI 与复审通过前不合并。
+预期：分支出现在 `rkshadow999/AgentDesk` 并触发 CI；CI 与复审通过前不合并。

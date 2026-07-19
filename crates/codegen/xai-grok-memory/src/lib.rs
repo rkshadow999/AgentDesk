@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Memory system for cross-session knowledge persistence.
 //!
 //! This crate provides a markdown-based memory storage layer that allows
@@ -39,7 +40,11 @@ pub mod watcher;
 
 pub use backend::{MemoryBackendImpl, MemoryBackendParams};
 pub use index::{MemoryIndex, init_sqlite_vec};
-pub use storage::{MemoryScope, MemoryStorage};
+pub use storage::{
+    BrowsableMemoryDocument, BrowsableMemoryFile, BrowsableMemoryListing, BrowsableMemoryScope,
+    BrowsableMemoryTarget, MAX_BROWSABLE_MEMORY_BYTES, MAX_BROWSABLE_MEMORY_FILES, MemoryScope,
+    MemoryStorage,
+};
 
 /// Embed all chunks that don't have embeddings yet.
 ///

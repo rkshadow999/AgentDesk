@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 use super::*;
 /// Build an unsigned JWT with a `tier` claim (header.payload.sig base64url).
 fn jwt_with_tier(tier: u64) -> String {
@@ -1866,18 +1867,49 @@ async fn push_roster_activity_delta_broadcasts_overridden_activity() {
     let changed = drain_roster_changed(&mut rx).expect("turn-end delta emitted");
     assert_eq!(changed.upserted[0].activity, RosterActivity::Idle);
 }
-/// Extract the inner payload from an ExtResponse.
+/// Parse the raw payload from an ExtResponse.
 #[expect(
     dead_code,
     reason = "unused in production; remove expect when wired or delete the item"
 )]
 fn parse_ext_body(resp: &acp::ExtResponse) -> serde_json::Value {
-    let outer: serde_json::Value =
-        serde_json::from_str(resp.0.get()).expect("ExtResponse must be valid JSON");
-    outer
-        .get("result")
-        .cloned()
-        .unwrap_or_else(|| panic!("ExtResponse has no 'result' key; full JSON: {outer}"))
+    serde_json::from_str(resp.0.get()).expect("ExtResponse must be valid JSON")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agentdesk_extensions_report_versioned_sandbox_health() {
+    use acp::Agent as _;
+
+    let agent = build_minimal_agent_for_tests();
+    let initialize_params = serde_json::value::to_raw_value(&serde_json::json!({
+        "protocolVersion": 1,
+        "client": { "name": "agentdesk", "version": "0.1.0" }
+    }))
+    .unwrap();
+    let initialize = agent
+        .ext_method(acp::ExtRequest::new(
+            "agentdesk/v1/initialize",
+            std::sync::Arc::from(initialize_params),
+        ))
+        .await
+        .expect("AgentDesk extension initialization must be supported");
+    let initialize_body = parse_ext_body(&initialize);
+    assert_eq!(initialize_body["protocolVersion"], 1);
+
+    let health_params = serde_json::value::to_raw_value(&serde_json::json!({})).unwrap();
+    let health = agent
+        .ext_method(acp::ExtRequest::new(
+            "agentdesk/v1/health",
+            std::sync::Arc::from(health_params),
+        ))
+        .await
+        .expect("AgentDesk health must be supported");
+    let health_body = parse_ext_body(&health);
+    assert_eq!(health_body["status"], "ok");
+    assert!(health_body["sandbox"]["configuredProfile"].is_string());
+    assert!(health_body["sandbox"]["active"].is_boolean());
+    assert!(health_body["sandbox"]["childNetworkRestricted"].is_boolean());
+    assert!(health_body["sandbox"]["enforcementRequired"].is_boolean());
 }
 /// Replicate the lookup logic of code_nav_eligibility_for_request so we
 /// can test it with a plain sessions HashMap.
@@ -2316,6 +2348,145 @@ async fn auth_type_xai_api_key_no_current_returns_api_key() {
         xai_chat_state::AuthType::ApiKey,
         "xai.api_key auth must report ApiKey -- BYOK has no session-token \
              behavior to fall back to."
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn desktop_api_key_auth_copies_key_then_scrubs_inherited_environment() {
+    use acp::Agent as _;
+    use crate::agent::auth_method::{
+        LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR, XAI_API_KEY_METHOD_ID,
+    };
+    use xai_grok_test_support::EnvGuard;
+
+    let grok_home = tempfile::tempdir().unwrap();
+    let _home = EnvGuard::set("GROK_HOME", grok_home.path());
+    let _disable_persist = EnvGuard::set("GROK_DISABLE_API_KEY_PERSIST", "1");
+    let _api_key = EnvGuard::set(XAI_API_KEY_ENV_VAR, "desktop-secret");
+    let _legacy_key = EnvGuard::set(LEGACY_XAI_API_KEY_ENV_VAR, "legacy-secret");
+    // SAFETY: this serial test captures the environment before constructing
+    // the agent or starting any agent-owned background work.
+    unsafe { crate::agent::auth_method::capture_desktop_api_key_before_runtime() }.unwrap();
+    assert!(std::env::var_os(XAI_API_KEY_ENV_VAR).is_none());
+    assert!(std::env::var_os(LEGACY_XAI_API_KEY_ENV_VAR).is_none());
+    let agent = build_agent_with_auth(crate::auth::GrokAuth {
+        key: "cached-session-token".into(),
+        auth_mode: crate::auth::AuthMode::WebLogin,
+        ..crate::auth::GrokAuth::test_default()
+    });
+    assert_eq!(
+        agent.sampling_config.borrow().api_key.as_deref(),
+        Some("cached-session-token"),
+        "precondition: cached session auth initially wins credential resolution"
+    );
+
+    agent
+        .authenticate(acp::AuthenticateRequest::new(acp::AuthMethodId::new(
+            XAI_API_KEY_METHOD_ID,
+        )))
+        .await
+        .expect("desktop API-key authentication should succeed");
+
+    assert_eq!(
+        agent.sampling_config.borrow().api_key.as_deref(),
+        Some("desktop-secret"),
+        "the key must be copied into runtime config before the environment is cleared"
+    );
+    assert!(std::env::var_os(XAI_API_KEY_ENV_VAR).is_none());
+    assert!(std::env::var_os(LEGACY_XAI_API_KEY_ENV_VAR).is_none());
+    assert!(
+        !grok_home.path().join("auth.json").exists(),
+        "desktop-managed API keys must not be persisted"
+    );
+    let model = agent
+        .models_manager
+        .models()
+        .values()
+        .next()
+        .cloned()
+        .expect("test agent should expose a model");
+    assert_eq!(
+        agent
+            .prepare_sampling_config_for_model(&model, None)
+            .api_key
+            .as_deref(),
+        Some("desktop-secret"),
+        "new sessions must reuse the memory-only runtime key after environment scrubbing"
+    );
+    let params = serde_json::value::to_raw_value(&serde_json::json!({
+        "key": "rotated-desktop-secret"
+    }))
+    .unwrap();
+    agent
+        .ext_method(acp::ExtRequest::new(
+            "x.ai/setApiKey",
+            std::sync::Arc::from(params),
+        ))
+        .await
+        .expect("desktop key rotation should remain available through the legacy extension");
+    assert_eq!(
+        agent.sampling_config.borrow().api_key.as_deref(),
+        Some("rotated-desktop-secret")
+    );
+    assert_eq!(
+        crate::agent::auth_method::read_xai_api_key_env().as_deref(),
+        Ok("rotated-desktop-secret")
+    );
+    assert!(std::env::var_os(XAI_API_KEY_ENV_VAR).is_none());
+    assert!(std::env::var_os(LEGACY_XAI_API_KEY_ENV_VAR).is_none());
+    assert!(!grok_home.path().join("auth.json").exists());
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn desktop_api_key_capture_removes_a_legacy_persisted_key() {
+    use crate::agent::auth_method::XAI_API_KEY_ENV_VAR;
+    use xai_grok_test_support::EnvGuard;
+
+    let grok_home = tempfile::tempdir().unwrap();
+    crate::auth::store_api_key(grok_home.path(), "legacy-disk-secret").unwrap();
+    let _home = EnvGuard::set("GROK_HOME", grok_home.path());
+    let _disable_persist = EnvGuard::set("GROK_DISABLE_API_KEY_PERSIST", "1");
+    let _api_key = EnvGuard::set(XAI_API_KEY_ENV_VAR, "desktop-memory-secret");
+
+    // SAFETY: this serial test runs before constructing an agent or starting
+    // agent-owned background work.
+    unsafe { crate::agent::auth_method::capture_desktop_api_key_before_runtime() }.unwrap();
+
+    assert_eq!(crate::auth::read_api_key(grok_home.path()), None);
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn api_key_auth_keeps_existing_environment_without_desktop_switch() {
+    use acp::Agent as _;
+    use crate::agent::auth_method::{
+        LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR, XAI_API_KEY_METHOD_ID,
+    };
+    use xai_grok_test_support::EnvGuard;
+
+    let _disable_persist = EnvGuard::unset("GROK_DISABLE_API_KEY_PERSIST");
+    let _api_key = EnvGuard::set(XAI_API_KEY_ENV_VAR, "default-secret");
+    let _legacy_key = EnvGuard::set(LEGACY_XAI_API_KEY_ENV_VAR, "legacy-secret");
+    // SAFETY: the switch is unset, so this call performs no environment mutation.
+    unsafe { crate::agent::auth_method::capture_desktop_api_key_before_runtime() }.unwrap();
+    let agent = build_minimal_agent_for_tests();
+
+    agent
+        .authenticate(acp::AuthenticateRequest::new(acp::AuthMethodId::new(
+            XAI_API_KEY_METHOD_ID,
+        )))
+        .await
+        .expect("default API-key authentication should succeed");
+
+    assert_eq!(
+        std::env::var(XAI_API_KEY_ENV_VAR).as_deref(),
+        Ok("default-secret")
+    );
+    assert_eq!(
+        std::env::var(LEGACY_XAI_API_KEY_ENV_VAR).as_deref(),
+        Ok("legacy-secret")
     );
 }
 /// Positive baseline: when both signals agree (session-based method AND

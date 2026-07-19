@@ -1,0 +1,90 @@
+name: Bug report / Bug 报告
+description: Report a reproducible AgentDesk defect / 报告可复现的 AgentDesk 缺陷
+title: "[Bug]: "
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include API keys, tokens, prompts, private source, usernames, or local paths. Security boundary bypasses must be reported through Private Vulnerability Reporting, not this form.
+
+        请勿包含 API Key、Token、提示词、私有源码、用户名或本地路径。安全边界绕过必须通过私有漏洞报告提交，不得使用本表单。
+  - type: input
+    id: version
+    attributes:
+      label: Version and revision / 版本与提交
+      description: Include SOURCE-REVISION.txt when available / 如有 SOURCE-REVISION.txt，请提供其中的版本与提交
+      placeholder: 0.1.0-alpha.2, revision abc123
+    validations:
+      required: true
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package / 包类型
+      options:
+        - Signed MSIX / 已签名 MSIX
+        - Portable zip / Portable 压缩包
+        - Source build / 源码构建
+        - CI artifact / CI 产物
+    validations:
+      required: true
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Architecture / 架构
+      options:
+        - x64
+        - ARM64
+    validations:
+      required: true
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Execution profile / 执行配置
+      options:
+        - Native compatibility (not sandboxed) / 本机兼容（非沙箱）
+        - WSL strict (blocked/fail-closed) / WSL 严格（受阻断）
+        - No engine session / 未启动引擎会话
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction / 复现步骤
+      description: Use a minimal sanitized workspace when possible / 尽量使用最小化且已脱敏的工作区
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior / 预期行为
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior / 实际行为
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics / 已脱敏诊断信息
+      description: Attach only logs or screenshots that contain no private content / 仅附加不含私密内容的日志或截图
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmation / 确认
+      options:
+        - label: I searched existing issues and reproduced this on the stated version. / 我已搜索现有 Issue，并在所述版本复现。
+          required: true
+        - label: I removed credentials, prompts, private source, usernames, and local paths. / 我已移除凭据、提示词、私有源码、用户名和本地路径。
+          required: true
+        - label: This is not an undisclosed security vulnerability. / 这不是尚未披露的安全漏洞。
+          required: true

@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 #![cfg_attr(rustfmt, rustfmt::skip)]
 #![allow(unused_imports)]
 //! Inherent [`MvpAgent`] helpers (MCP/clients/gateway, settings/models, session ops, spawn).
@@ -1472,6 +1473,7 @@ impl MvpAgent {
             session_threads: RefCell::new(HashMap::new()),
             resident_roster_titles: RefCell::new(HashMap::new()),
             initialize_request: OnceLock::new(),
+            agentdesk_extension_initialized: std::cell::Cell::new(false),
             gateway,
             subagent_model_overrides: cfg.subagent_model_overrides.clone(),
             subagent_toggle: cfg.subagent_toggle.clone(),
@@ -1581,6 +1583,14 @@ impl MvpAgent {
             crate::auth::credential_provider::wire_otel_deployment_key(dk.clone());
         }
         instance
+    }
+
+    pub(crate) fn mark_agentdesk_extension_initialized(&self) {
+        self.agentdesk_extension_initialized.set(true);
+    }
+
+    pub(crate) fn agentdesk_extension_initialized(&self) -> bool {
+        self.agentdesk_extension_initialized.get()
     }
     /// Handle `x.ai/internal/evict_sessions` — the leader server tells us a
     /// client disconnected and these sessions lost their IPC owner.

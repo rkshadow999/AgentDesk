@@ -1,8 +1,16 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use super::model::{API_KEY_SCOPE, AuthMode, AuthStore, GrokAuth, lookup_auth};
+
+pub(crate) const DISABLE_API_KEY_PERSIST_ENV_VAR: &str = "GROK_DISABLE_API_KEY_PERSIST";
+
+/// Whether API keys must remain memory-only for a credential-managing client.
+pub(crate) fn api_key_persistence_disabled() -> bool {
+    std::env::var(DISABLE_API_KEY_PERSIST_ENV_VAR).is_ok_and(|value| value == "1")
+}
 
 /// RAII guard for an exclusive advisory lock on `auth.json.lock`.
 /// The lock is released when the inner `File` is dropped (closing the FD).
@@ -348,6 +356,9 @@ pub fn read_api_key(grok_home: &Path) -> Option<String> {
 /// Uses the corrupt-recovery reader so a malformed auth.json (e.g. from a
 /// previous crash) can be healed when the user sets an API key.
 pub fn store_api_key(grok_home: &Path, api_key: &str) -> std::io::Result<()> {
+    if api_key_persistence_disabled() {
+        return Ok(());
+    }
     let path = grok_home.join("auth.json");
     let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
     map.insert(
@@ -364,20 +375,30 @@ pub fn store_api_key(grok_home: &Path, api_key: &str) -> std::io::Result<()> {
 /// Remove the `xai::api_key` scope from auth.json.
 pub fn clear_api_key(grok_home: &Path) -> std::io::Result<()> {
     let path = grok_home.join("auth.json");
-    if let Ok(mut map) = read_auth_json(&path) {
-        map.remove(API_KEY_SCOPE);
-        if map.is_empty() {
-            let _ = std::fs::remove_file(&path);
-        } else {
-            write_auth_json(&path, &map)?;
-        }
+    let mut map = match read_auth_json(&path) {
+        Ok(map) => map,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if map.remove(API_KEY_SCOPE).is_none() {
+        return Ok(());
     }
-    Ok(())
+    if map.is_empty() {
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    } else {
+        write_auth_json(&path, &map)
+    }
 }
 
 #[cfg(test)]
 mod write_fallback_tests {
     use super::*;
+    use serial_test::serial;
+    use xai_grok_test_support::EnvGuard;
 
     fn sample_store() -> AuthStore {
         let mut map = AuthStore::new();
@@ -465,6 +486,53 @@ mod write_fallback_tests {
         let path = dir.path().join("auth.json");
         write_auth_json(&path, &sample_store()).unwrap();
         assert_eq!(read_key(&path).as_deref(), Some("secret-key"));
+    }
+
+    #[test]
+    #[serial]
+    fn disabled_api_key_persistence_does_not_create_auth_json() {
+        let _disable = EnvGuard::set("GROK_DISABLE_API_KEY_PERSIST", "1");
+        let dir = tempfile::tempdir().unwrap();
+
+        store_api_key(dir.path(), "desktop-secret").unwrap();
+
+        assert!(
+            !dir.path().join("auth.json").exists(),
+            "desktop-managed API keys must remain memory-only"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn disabled_api_key_persistence_does_not_modify_existing_auth_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        write_auth_json(&path, &sample_store()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let _disable = EnvGuard::set("GROK_DISABLE_API_KEY_PERSIST", "1");
+
+        store_api_key(dir.path(), "replacement-key").unwrap();
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the desktop switch must suppress every auth.json API-key write"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn api_key_persistence_remains_enabled_by_default() {
+        let _disable = EnvGuard::unset("GROK_DISABLE_API_KEY_PERSIST");
+        let dir = tempfile::tempdir().unwrap();
+
+        store_api_key(dir.path(), "default-secret").unwrap();
+
+        assert_eq!(
+            read_api_key(dir.path()).as_deref(),
+            Some("default-secret"),
+            "the opt-in desktop switch must not change existing persistence"
+        );
     }
 
     /// A fallback write that truncates then fails must roll back to the prior

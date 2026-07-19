@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use xai_grok_shell::extensions::billing::{BillingConfig, Cent, UsagePeriod};
@@ -264,6 +265,7 @@ fn parse_subagent_kill_outcome_round_trips_agent_serialization() {
     };
     let wire = serde_json::to_string(
             &ExtMethodResult::success(CancelSubagentResponse {
+                session_id: "session-1".into(),
                 subagent_id: "sa-1".into(),
                 cancelled: false,
                 outcome: Some(SubagentCancelOutcomeDto::AlreadyFinished {

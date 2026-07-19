@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Markdown-based memory file storage.
 //!
 //! Handles reading and writing memory files (`.md`) for both global
@@ -5,6 +6,7 @@
 //! `~/.grok/memory/{project-slug}-{hash8}/` to avoid polluting the user's repo.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use xai_grok_tools::util::grok_home::grok_home;
 
@@ -16,6 +18,99 @@ pub enum MemoryScope {
     Global,
     /// Workspace-scoped memory — specific to one project.
     Workspace,
+}
+
+pub const MAX_BROWSABLE_MEMORY_BYTES: usize = 64 * 1024;
+pub const MAX_BROWSABLE_MEMORY_FILES: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowsableMemoryScope {
+    Global,
+    Workspace,
+    Session,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrowsableMemoryTarget {
+    Global,
+    Workspace,
+    SessionLog(String),
+}
+
+impl BrowsableMemoryTarget {
+    pub fn parse_id(id: &str) -> std::io::Result<Self> {
+        match id {
+            "global" => Ok(Self::Global),
+            "workspace" => Ok(Self::Workspace),
+            _ => {
+                let filename = id.strip_prefix("session/").ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "unknown browsable memory file id",
+                    )
+                })?;
+                if filename.is_empty()
+                    || filename.len() > 255
+                    || !filename.ends_with(".md")
+                    || filename.bytes().any(|byte| {
+                        !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+                    })
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "invalid session memory filename",
+                    ));
+                }
+                Ok(Self::SessionLog(filename.to_string()))
+            }
+        }
+    }
+
+    pub fn id(&self) -> String {
+        match self {
+            Self::Global => "global".to_string(),
+            Self::Workspace => "workspace".to_string(),
+            Self::SessionLog(filename) => format!("session/{filename}"),
+        }
+    }
+
+    pub fn scope(&self) -> BrowsableMemoryScope {
+        match self {
+            Self::Global => BrowsableMemoryScope::Global,
+            Self::Workspace => BrowsableMemoryScope::Workspace,
+            Self::SessionLog(_) => BrowsableMemoryScope::Session,
+        }
+    }
+
+    fn display_name(&self) -> String {
+        match self {
+            Self::Global => "Global MEMORY.md".to_string(),
+            Self::Workspace => "Workspace MEMORY.md".to_string(),
+            Self::SessionLog(filename) => filename.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowsableMemoryFile {
+    pub id: String,
+    pub scope: BrowsableMemoryScope,
+    pub name: String,
+    pub byte_len: u64,
+    pub modified: Option<SystemTime>,
+    pub writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowsableMemoryDocument {
+    pub file: BrowsableMemoryFile,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowsableMemoryListing {
+    pub files: Vec<BrowsableMemoryFile>,
+    pub truncated: bool,
 }
 
 /// Handles file I/O for the memory storage layer.
@@ -74,7 +169,7 @@ impl MemoryStorage {
     }
 
     /// Create a `MemoryStorage` with explicit paths (for testing).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_paths(global_dir: PathBuf, workspace_dir: PathBuf) -> Self {
         Self {
             global_dir,
@@ -146,6 +241,232 @@ impl MemoryStorage {
     /// Path to the workspace sessions directory.
     pub fn sessions_dir(&self) -> PathBuf {
         self.workspace_dir.join("sessions")
+    }
+
+    pub fn list_browsable_files(&self) -> std::io::Result<BrowsableMemoryListing> {
+        let mut files = Vec::new();
+        for target in [
+            BrowsableMemoryTarget::Global,
+            BrowsableMemoryTarget::Workspace,
+        ] {
+            match self.browsable_metadata(&target) {
+                Ok(metadata) => files.push(metadata),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        let sessions_dir = self.sessions_dir();
+        match std::fs::symlink_metadata(&sessions_dir) {
+            Ok(_) => {
+                self.ensure_safe_directory(&sessions_dir)?;
+                let mut session_targets = Vec::new();
+                for entry in std::fs::read_dir(&sessions_dir)? {
+                    let entry = entry?;
+                    let filename = entry.file_name().to_string_lossy().to_string();
+                    let Ok(target) =
+                        BrowsableMemoryTarget::parse_id(&format!("session/{filename}"))
+                    else {
+                        continue;
+                    };
+                    session_targets.push(target);
+                    if session_targets.len() > MAX_BROWSABLE_MEMORY_FILES {
+                        break;
+                    }
+                }
+                session_targets.sort_by_key(BrowsableMemoryTarget::id);
+                for target in session_targets {
+                    if files.len() >= MAX_BROWSABLE_MEMORY_FILES + 1 {
+                        break;
+                    }
+                    files.push(self.browsable_metadata(&target)?);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+
+        let truncated = files.len() > MAX_BROWSABLE_MEMORY_FILES;
+        files.truncate(MAX_BROWSABLE_MEMORY_FILES);
+        Ok(BrowsableMemoryListing { files, truncated })
+    }
+
+    pub fn read_browsable_file(
+        &self,
+        target: &BrowsableMemoryTarget,
+    ) -> std::io::Result<BrowsableMemoryDocument> {
+        use std::io::Read;
+
+        let path = self.resolve_existing_browsable_path(target)?;
+        let mut file = std::fs::File::open(&path)?;
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take((MAX_BROWSABLE_MEMORY_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_BROWSABLE_MEMORY_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "memory file exceeds the browse limit",
+            ));
+        }
+        let content = String::from_utf8(bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let file = self.browsable_metadata(target)?;
+        Ok(BrowsableMemoryDocument { file, content })
+    }
+
+    pub fn write_browsable_file(
+        &self,
+        target: &BrowsableMemoryTarget,
+        content: &str,
+    ) -> std::io::Result<BrowsableMemoryFile> {
+        use std::io::Write;
+
+        if content.len() > MAX_BROWSABLE_MEMORY_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "memory content exceeds the write limit",
+            ));
+        }
+        if self.ephemeral && !matches!(target, BrowsableMemoryTarget::Global) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "workspace memory is disabled for ephemeral workspaces",
+            ));
+        }
+
+        let path = self.prepare_browsable_write(target)?;
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "memory path has no parent",
+            )
+        })?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        temporary.write_all(content.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        self.reject_link_or_reparse_if_present(&path)?;
+        temporary.persist(&path).map_err(|error| error.error)?;
+        self.browsable_metadata(target)
+    }
+
+    pub fn delete_browsable_file(&self, target: &BrowsableMemoryTarget) -> std::io::Result<bool> {
+        if self.ephemeral && !matches!(target, BrowsableMemoryTarget::Global) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "workspace memory is disabled for ephemeral workspaces",
+            ));
+        }
+        let path = match self.resolve_existing_browsable_path(target) {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        std::fs::remove_file(path)?;
+        Ok(true)
+    }
+
+    fn browsable_path(&self, target: &BrowsableMemoryTarget) -> PathBuf {
+        match target {
+            BrowsableMemoryTarget::Global => self.global_memory_file(),
+            BrowsableMemoryTarget::Workspace => self.workspace_memory_file(),
+            BrowsableMemoryTarget::SessionLog(filename) => self.sessions_dir().join(filename),
+        }
+    }
+
+    fn required_directories(&self, target: &BrowsableMemoryTarget) -> Vec<&Path> {
+        match target {
+            BrowsableMemoryTarget::Global => vec![&self.global_dir],
+            BrowsableMemoryTarget::Workspace => vec![&self.global_dir, &self.workspace_dir],
+            BrowsableMemoryTarget::SessionLog(_) => {
+                vec![&self.global_dir, &self.workspace_dir]
+            }
+        }
+    }
+
+    fn ensure_safe_directory(&self, path: &Path) -> std::io::Result<()> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if is_link_or_reparse_point(&metadata) || !metadata.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "memory directory is a link, reparse point, or non-directory",
+            ));
+        }
+        Ok(())
+    }
+
+    fn reject_link_or_reparse_if_present(&self, path: &Path) -> std::io::Result<()> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if is_link_or_reparse_point(&metadata) => Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "memory file is a link or reparse point",
+            )),
+            Ok(metadata) if !metadata.is_file() => Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "memory target is not a regular file",
+            )),
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn resolve_existing_browsable_path(
+        &self,
+        target: &BrowsableMemoryTarget,
+    ) -> std::io::Result<PathBuf> {
+        for directory in self.required_directories(target) {
+            self.ensure_safe_directory(directory)?;
+        }
+        if matches!(target, BrowsableMemoryTarget::SessionLog(_)) {
+            self.ensure_safe_directory(&self.sessions_dir())?;
+        }
+        let path = self.browsable_path(target);
+        self.reject_link_or_reparse_if_present(&path)?;
+        let canonical_path = dunce::canonicalize(&path)?;
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "memory path has no parent",
+            )
+        })?;
+        let canonical_parent = dunce::canonicalize(parent)?;
+        if canonical_path.parent() != Some(canonical_parent.as_path()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "memory file escaped its allowed directory",
+            ));
+        }
+        Ok(canonical_path)
+    }
+
+    fn prepare_browsable_write(&self, target: &BrowsableMemoryTarget) -> std::io::Result<PathBuf> {
+        if matches!(target, BrowsableMemoryTarget::SessionLog(_)) {
+            return self.resolve_existing_browsable_path(target);
+        }
+        for directory in self.required_directories(target) {
+            std::fs::create_dir_all(directory)?;
+            self.ensure_safe_directory(directory)?;
+        }
+        let path = self.browsable_path(target);
+        self.reject_link_or_reparse_if_present(&path)?;
+        Ok(path)
+    }
+
+    fn browsable_metadata(
+        &self,
+        target: &BrowsableMemoryTarget,
+    ) -> std::io::Result<BrowsableMemoryFile> {
+        let path = self.resolve_existing_browsable_path(target)?;
+        let metadata = std::fs::metadata(path)?;
+        Ok(BrowsableMemoryFile {
+            id: target.id(),
+            scope: target.scope(),
+            name: target.display_name(),
+            byte_len: metadata.len(),
+            modified: metadata.modified().ok(),
+            writable: !self.ephemeral || matches!(target, BrowsableMemoryTarget::Global),
+        })
     }
 
     /// Write a daily session log file.
@@ -689,6 +1010,23 @@ fn normalize_remote_url(url: &str) -> Option<String> {
     Some(cleaned.to_string())
 }
 
+fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+
+    #[cfg(not(windows))]
+    false
+}
+
 /// Generate a URL-safe slug from a string (e.g., first user message).
 ///
 /// - Lowercases
@@ -948,6 +1286,192 @@ mod tests {
                 .unwrap()
                 == "memory"
         );
+    }
+
+    #[test]
+    fn test_browsable_memory_lists_only_scoped_files_and_reads_utf8() {
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("current-workspace");
+        let other_workspace = global_dir.join("other-workspace");
+        let storage = MemoryStorage::with_paths(global_dir.clone(), workspace_dir.clone());
+
+        storage
+            .write_long_term(MemoryScope::Global, "# Global\n\n你好")
+            .unwrap();
+        storage
+            .write_long_term(MemoryScope::Workspace, "# Workspace\n\nAgentDesk")
+            .unwrap();
+        let session_path = storage
+            .write_daily_log("2026-07-18", "memory", "session-1234", "# Session", false)
+            .unwrap();
+        std::fs::create_dir_all(&other_workspace).unwrap();
+        std::fs::write(other_workspace.join("MEMORY.md"), "must stay hidden").unwrap();
+
+        let listing = storage.list_browsable_files().unwrap();
+        let session_id = format!(
+            "session/{}",
+            session_path.file_name().unwrap().to_string_lossy()
+        );
+
+        assert!(!listing.truncated);
+        assert_eq!(
+            listing
+                .files
+                .iter()
+                .map(|file| file.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["global", "workspace", session_id.as_str()]
+        );
+        assert!(
+            listing
+                .files
+                .iter()
+                .all(|file| !file.name.contains(global_dir.to_string_lossy().as_ref()))
+        );
+        assert_eq!(listing.files[0].scope, BrowsableMemoryScope::Global);
+        assert_eq!(listing.files[1].scope, BrowsableMemoryScope::Workspace);
+        assert_eq!(listing.files[2].scope, BrowsableMemoryScope::Session);
+
+        let document = storage
+            .read_browsable_file(&BrowsableMemoryTarget::parse_id("global").unwrap())
+            .unwrap();
+        assert_eq!(document.content, "# Global\n\n你好");
+        assert_eq!(document.file.id, "global");
+    }
+
+    #[test]
+    fn test_browsable_memory_rejects_unsafe_ids_and_oversized_content() {
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("current-workspace");
+        let storage = MemoryStorage::with_paths(global_dir, workspace_dir);
+
+        for unsafe_id in [
+            "",
+            "other",
+            "session/../MEMORY.md",
+            "session/subdir/log.md",
+            "session/log.txt",
+            "session/C:\\secret.md",
+        ] {
+            let error = BrowsableMemoryTarget::parse_id(unsafe_id).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+
+        let oversized = "x".repeat(MAX_BROWSABLE_MEMORY_BYTES + 1);
+        let write_error = storage
+            .write_browsable_file(&BrowsableMemoryTarget::Workspace, &oversized)
+            .unwrap_err();
+        assert_eq!(write_error.kind(), std::io::ErrorKind::InvalidInput);
+
+        storage
+            .write_long_term(MemoryScope::Global, &oversized)
+            .unwrap();
+        let read_error = storage
+            .read_browsable_file(&BrowsableMemoryTarget::Global)
+            .unwrap_err();
+        assert_eq!(read_error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_browsable_memory_writes_existing_targets_and_deletes_exact_file() {
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("current-workspace");
+        let storage = MemoryStorage::with_paths(global_dir, workspace_dir);
+        storage.ensure_initialized().unwrap();
+        let session_path = storage
+            .write_daily_log("2026-07-18", "memory", "session-1234", "old", false)
+            .unwrap();
+        let session_target = BrowsableMemoryTarget::parse_id(&format!(
+            "session/{}",
+            session_path.file_name().unwrap().to_string_lossy()
+        ))
+        .unwrap();
+
+        let metadata = storage
+            .write_browsable_file(&BrowsableMemoryTarget::Workspace, "new workspace")
+            .unwrap();
+        assert_eq!(metadata.byte_len, "new workspace".len() as u64);
+        storage
+            .write_browsable_file(&session_target, "new session")
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&session_path).unwrap(),
+            "new session"
+        );
+
+        let missing_session =
+            BrowsableMemoryTarget::parse_id("session/2026-07-18-missing-abcd.md").unwrap();
+        assert_eq!(
+            storage
+                .write_browsable_file(&missing_session, "must not create")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+
+        assert!(storage.delete_browsable_file(&session_target).unwrap());
+        assert!(!session_path.exists());
+        assert!(!storage.delete_browsable_file(&session_target).unwrap());
+        assert!(storage.workspace_memory_file().exists());
+    }
+
+    #[test]
+    fn test_browsable_memory_list_is_bounded() {
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("current-workspace");
+        let storage = MemoryStorage::with_paths(global_dir, workspace_dir);
+        std::fs::create_dir_all(storage.sessions_dir()).unwrap();
+        for index in 0..=MAX_BROWSABLE_MEMORY_FILES {
+            std::fs::write(
+                storage
+                    .sessions_dir()
+                    .join(format!("2026-07-18-log-{index:04}.md")),
+                index.to_string(),
+            )
+            .unwrap();
+        }
+
+        let listing = storage.list_browsable_files().unwrap();
+
+        assert_eq!(listing.files.len(), MAX_BROWSABLE_MEMORY_FILES);
+        assert!(listing.truncated);
+    }
+
+    #[cfg(unix)]
+    fn create_test_directory_link(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn create_test_directory_link(target: &Path, link: &Path) {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to create test directory junction");
+    }
+
+    #[test]
+    fn test_browsable_memory_rejects_linked_sessions_directory() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("current-workspace");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        std::fs::write(outside.path().join("2026-07-18-secret-abcd.md"), "secret").unwrap();
+        create_test_directory_link(outside.path(), &workspace_dir.join("sessions"));
+        let storage = MemoryStorage::with_paths(global_dir, workspace_dir);
+        let target = BrowsableMemoryTarget::parse_id("session/2026-07-18-secret-abcd.md").unwrap();
+
+        let error = storage.read_browsable_file(&target).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[test]

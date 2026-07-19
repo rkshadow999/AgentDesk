@@ -8,6 +8,7 @@ description = "Backend environment presets for the Grok CLI crate family: endpoi
 [features]
 # single shared rlib per crate, so downstream Bazel test targets need the
 default-bazel = []
+test-support = []
 
 [dependencies]
 tracing = { workspace = true }

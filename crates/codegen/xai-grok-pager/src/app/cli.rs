@@ -1,6 +1,7 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! CLI argument parsing for the pager.
 pub use crate::headless::OutputFormat;
-use clap::{ArgAction, Parser, Subcommand, ValueHint};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum, ValueHint};
 use clap_complete::Shell;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -247,6 +248,23 @@ pub struct WorkspaceStartArgs {
     #[arg(long)]
     pub json: bool,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AgentDeskOpenAiBackend {
+    #[value(name = "chat_completions")]
+    ChatCompletions,
+    #[value(name = "responses")]
+    Responses,
+}
+
+impl AgentDeskOpenAiBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat_completions",
+            Self::Responses => "responses",
+        }
+    }
+}
+
 /// Arguments for the `agent` subcommand.
 #[derive(Debug, clap::Args, Clone)]
 pub struct AgentArgs {
@@ -296,6 +314,20 @@ pub struct AgentArgs {
     /// Override the public xAI API base URL.
     #[arg(long = "xai-api-base-url")]
     pub xai_api_base_url: Option<String>,
+    /// Configure an OpenAI-compatible endpoint for the AgentDesk stdio client.
+    #[arg(
+        long = "agentdesk-openai-base-url",
+        value_name = "URL",
+        requires_all = ["model", "no_leader"]
+    )]
+    pub agentdesk_openai_base_url: Option<String>,
+    /// Select the OpenAI-compatible API shape for the AgentDesk endpoint.
+    #[arg(
+        long = "agentdesk-openai-backend",
+        value_name = "BACKEND",
+        requires = "agentdesk_openai_base_url"
+    )]
+    pub agentdesk_openai_backend: Option<AgentDeskOpenAiBackend>,
     /// Agent runtime mode
     #[command(subcommand)]
     pub mode: Option<AgentCmd>,
@@ -1230,5 +1262,74 @@ mod tests {
             panic!("expected agent subcommand");
         };
         assert_eq!(agent.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn agentdesk_openai_backend_parses_for_stdio_agent() {
+        let args = PagerArgs::try_parse_from([
+            "grok",
+            "agent",
+            "--no-leader",
+            "--model",
+            "grok-4.5",
+            "--agentdesk-openai-base-url",
+            "https://example.com/v1/",
+            "--agentdesk-openai-backend",
+            "responses",
+            "stdio",
+        ])
+        .expect("AgentDesk OpenAI-compatible args parse");
+        let Command::Agent(agent) = args.command.expect("agent subcommand") else {
+            panic!("expected agent subcommand");
+        };
+        assert_eq!(agent.model.as_deref(), Some("grok-4.5"));
+        assert_eq!(
+            agent.agentdesk_openai_base_url.as_deref(),
+            Some("https://example.com/v1/")
+        );
+        assert_eq!(
+            agent.agentdesk_openai_backend,
+            Some(AgentDeskOpenAiBackend::Responses)
+        );
+        assert!(matches!(agent.mode, Some(AgentCmd::Stdio)));
+    }
+
+    #[test]
+    fn agentdesk_openai_backend_rejects_unsupported_values() {
+        let error = PagerArgs::try_parse_from([
+            "grok",
+            "agent",
+            "--no-leader",
+            "--model",
+            "grok-4.5",
+            "--agentdesk-openai-base-url",
+            "https://example.com/v1",
+            "--agentdesk-openai-backend",
+            "messages",
+            "stdio",
+        ])
+        .expect_err("AgentDesk must reject unsupported provider backends");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn agentdesk_openai_backend_requires_a_custom_base_url() {
+        let error = PagerArgs::try_parse_from([
+            "grok",
+            "agent",
+            "--no-leader",
+            "--model",
+            "grok-4.5",
+            "--agentdesk-openai-backend",
+            "responses",
+            "stdio",
+        ])
+        .expect_err("a backend without the AgentDesk endpoint must fail closed");
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 }

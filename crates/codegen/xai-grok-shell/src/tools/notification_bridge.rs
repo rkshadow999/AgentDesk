@@ -1,6 +1,8 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Notification bridge: translates `xai-grok-tools` `ToolNotification` events
 //! into `xai-grok-shell`'s native systems (ACP gateway, hunk tracker, file state tracker).
 
+#[cfg(test)]
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,6 +17,7 @@ use xai_hunk_tracker::HunkTrackerHandle;
 use crate::session::commands::SessionCommand;
 use crate::session::commands::{NotificationPriority, NotificationSource};
 use crate::session::persistence::PersistenceMsg;
+use crate::tools::incremental_bash::IncrementalBashCursors;
 use xai_grok_workspace::session::file_state::FileStateTracker;
 
 /// Configuration for the notification bridge.
@@ -104,6 +107,55 @@ pub(crate) fn resolved_tool_name(slot: &std::sync::OnceLock<Option<String>>) -> 
     slot.get().and_then(|v| v.as_deref())
 }
 
+trait BashCursorStore {
+    fn previous_total(&self, tool_call_id: &str) -> usize;
+    fn record_total(&mut self, tool_call_id: &str, total: usize);
+    fn complete_tool(&mut self, tool_call_id: &str);
+    fn background_task(&mut self, task_id: &str, tool_call_id: &str);
+    fn complete_task(&mut self, task_id: &str);
+}
+
+impl BashCursorStore for IncrementalBashCursors {
+    fn previous_total(&self, tool_call_id: &str) -> usize {
+        IncrementalBashCursors::previous_total(self, tool_call_id)
+    }
+
+    fn record_total(&mut self, tool_call_id: &str, total: usize) {
+        IncrementalBashCursors::record_total(self, tool_call_id, total);
+    }
+
+    fn complete_tool(&mut self, tool_call_id: &str) {
+        IncrementalBashCursors::complete_tool(self, tool_call_id);
+    }
+
+    fn background_task(&mut self, task_id: &str, tool_call_id: &str) {
+        IncrementalBashCursors::background_task(self, task_id, tool_call_id);
+    }
+
+    fn complete_task(&mut self, task_id: &str) {
+        IncrementalBashCursors::complete_task(self, task_id);
+    }
+}
+
+#[cfg(test)]
+impl BashCursorStore for HashMap<String, usize> {
+    fn previous_total(&self, tool_call_id: &str) -> usize {
+        self.get(tool_call_id).copied().unwrap_or(0)
+    }
+
+    fn record_total(&mut self, tool_call_id: &str, total: usize) {
+        self.insert(tool_call_id.to_owned(), total);
+    }
+
+    fn complete_tool(&mut self, tool_call_id: &str) {
+        self.remove(tool_call_id);
+    }
+
+    fn background_task(&mut self, _task_id: &str, _tool_call_id: &str) {}
+
+    fn complete_task(&mut self, _task_id: &str) {}
+}
+
 /// Stamp a bridge-emitted notification's meta before it forks into
 /// persistence + broadcast — see `util::event_id::ensure_event_id_meta`.
 fn stamp_event_id(config: &NotificationBridgeConfig, meta: &mut Option<acp::Meta>) {
@@ -116,9 +168,9 @@ pub fn spawn_notification_bridge(config: NotificationBridgeConfig) -> ToolNotifi
     let (handle, mut rx) = ToolNotificationHandle::channel();
 
     tokio::task::spawn_local(async move {
-        // Per-tool-call byte offset for incremental delta computation.
+        // Per-tool-call monotonic byte total for incremental delta computation.
         // Only used when `config.incremental_bash_output` is true.
-        let mut offsets: HashMap<String, usize> = HashMap::new();
+        let mut offsets = IncrementalBashCursors::default();
 
         while let Some(notification) = rx.recv().await {
             handle_notification(&config, notification, &mut offsets).await;
@@ -152,25 +204,22 @@ async fn emit_current_mode_update(
 }
 
 /// Handle a single notification by forwarding it to the appropriate shell system.
-async fn handle_notification(
+async fn handle_notification<C: BashCursorStore>(
     config: &NotificationBridgeConfig,
     notification: ToolNotification,
-    offsets: &mut HashMap<String, usize>,
+    offsets: &mut C,
 ) {
     match notification {
         ToolNotification::BashOutputChunk(chunk) => {
             // Compute output and output_delta based on incremental mode.
             let (output, output_delta) = if config.incremental_bash_output {
-                let prev_offset = offsets.get(&chunk.base.tool_call_id).copied().unwrap_or(0);
-                let full = &chunk.base.output;
-                let delta = if prev_offset <= full.len() {
-                    full[prev_offset..].to_vec()
-                } else {
-                    // Buffer shrank (e.g. terminal clear / reset).
-                    // Send the full buffer and reset offset.
-                    full.clone()
-                };
-                offsets.insert(chunk.base.tool_call_id.clone(), full.len());
+                let previous_total = offsets.previous_total(&chunk.base.tool_call_id);
+                let (delta, next_total) = crate::tools::incremental_bash::output_delta(
+                    previous_total,
+                    &chunk.base.output,
+                    chunk.base.total_bytes,
+                );
+                offsets.record_total(&chunk.base.tool_call_id, next_total);
                 // In incremental mode: output is empty, delta carries the bytes.
                 (Vec::new(), Some(delta))
             } else {
@@ -226,7 +275,7 @@ async fn handle_notification(
 
         ToolNotification::BashExecutionComplete(complete) => {
             // Clean up offset tracking for this tool call.
-            offsets.remove(&complete.base.tool_call_id);
+            offsets.complete_tool(&complete.base.tool_call_id);
             tracing::debug!(
                 tool_call_id = %complete.base.tool_call_id,
                 exit_code = ?complete.exit_code,
@@ -235,6 +284,7 @@ async fn handle_notification(
         }
 
         ToolNotification::BashExecutionTimeout(timeout) => {
+            offsets.complete_tool(&timeout.base.tool_call_id);
             tracing::debug!(
                 tool_call_id = %timeout.base.tool_call_id,
                 elapsed = ?timeout.elapsed,
@@ -243,6 +293,7 @@ async fn handle_notification(
         }
 
         ToolNotification::BashExecutionFailed(failed) => {
+            offsets.complete_tool(&failed.tool_call_id);
             tracing::warn!(
                 tool_call_id = %failed.tool_call_id,
                 error = %failed.error,
@@ -251,6 +302,7 @@ async fn handle_notification(
         }
 
         ToolNotification::BashExecutionBackgrounded(bg) => {
+            offsets.background_task(&bg.task_id, &bg.base.tool_call_id);
             tracing::debug!(
                 tool_call_id = %bg.base.tool_call_id,
                 task_id = %bg.task_id,
@@ -327,6 +379,7 @@ async fn handle_notification(
             let is_monitor =
                 task_snapshot.kind == xai_grok_tools::computer::types::TaskKind::Monitor;
             let task_id = task_snapshot.task_id.clone();
+            offsets.complete_task(&task_id);
             let goal_loop_active = config
                 .goal_loop_active
                 .load(std::sync::atomic::Ordering::Relaxed);

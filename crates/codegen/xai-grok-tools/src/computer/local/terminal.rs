@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Actor-based terminal implementation with support for foreground and background execution.
 //!
 //! This module implements a terminal backend using the actor pattern:
@@ -1604,21 +1605,7 @@ impl LocalTerminalActor {
         // after `maybe_truncate` freezes the front half and keeps only the
         // shrinking tail, a length-based gate would go false and stay false,
         // starving the stream of chunks for the rest of a long-output command.
-        if process.total_bytes > process.last_notified_total {
-            process
-                .notification_handle
-                .send_output_chunk(BashOutputChunk {
-                    base: BashNotificationBase {
-                        tool_call_id: process.tool_call_id.clone(),
-                        command: process.command.clone(),
-                        output: process.output_buffer.clone(),
-                        total_bytes: process.total_bytes,
-                        truncated: process.truncated,
-                        cwd: process.cwd.clone().into(),
-                    },
-                });
-            process.last_notified_total = process.total_bytes;
-        }
+        notify_output_chunk_if_new(process);
 
         // Foreground budget: auto-backgroundable commands stop blocking the
         // turn after the per-process budget (independent of `timeout`) — this
@@ -2489,6 +2476,27 @@ async fn drain_remaining_output(process: &mut ProcessState) {
     process.child.stderr.take();
 
     process.maybe_truncate();
+    notify_output_chunk_if_new(process);
+}
+
+fn notify_output_chunk_if_new(process: &mut ProcessState) {
+    if process.total_bytes <= process.last_notified_total {
+        return;
+    }
+
+    process
+        .notification_handle
+        .send_output_chunk(BashOutputChunk {
+            base: BashNotificationBase {
+                tool_call_id: process.tool_call_id.clone(),
+                command: process.command.clone(),
+                output: process.output_buffer.clone(),
+                total_bytes: process.total_bytes,
+                truncated: process.truncated,
+                cwd: process.cwd.clone().into(),
+            },
+        });
+    process.last_notified_total = process.total_bytes;
 }
 
 /// Two-phase kill that synchronously waits for the process to exit.
@@ -2775,7 +2783,7 @@ fn spawn_shell_command(
     };
 
     #[cfg(not(unix))]
-    let mut build_cmd = |with_breakaway: bool| {
+    let build_cmd = |with_breakaway: bool| {
         use windows::Win32::System::Threading::{
             CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
         };
@@ -3724,6 +3732,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn final_drain_emits_chunk_reaching_result_total() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = ToolNotificationHandle::from_sender(tx);
+
+        let backend = LocalTerminalBackend::new();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let request = TerminalRunRequest {
+            command: "(sleep 0.05; printf final-tail) &".to_string(),
+            working_directory: tmp.path().to_path_buf(),
+            env: HashMap::new(),
+            timeout: Duration::from_secs(5),
+            output_byte_limit: 1024 * 1024,
+            output_file: tmp.path().join("final-drain.log"),
+            notification_handle: handle,
+            tool_call_id: "final-drain-call".to_string(),
+            display_command: None,
+            auto_background_on_timeout: false,
+            foreground_block_budget: None,
+            kind: TaskKind::Bash,
+            owner_session_id: None,
+        };
+
+        let result = backend.run(request).await.unwrap();
+        let chunks = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|notification| match notification {
+                crate::notification::types::ToolNotification::BashOutputChunk(chunk) => Some(chunk),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let last = chunks.last().expect("the final drain must emit a chunk");
+
+        assert_eq!(last.base.total_bytes, result.total_bytes);
+        assert!(last.base.output.ends_with(b"final-tail"));
     }
 
     #[tokio::test]

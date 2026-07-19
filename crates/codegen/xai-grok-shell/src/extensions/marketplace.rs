@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! `x.ai/marketplace/*` extension handlers.
 //!
 //! Provides marketplace browsing and install endpoints for the pager modal.
@@ -23,6 +24,23 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "x.ai/marketplace/action" => handle_action(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
     }
+}
+
+fn suppress_default_install(agent: &MvpAgent, args: &acp::ExtRequest) -> bool {
+    agent.agentdesk_extension_initialized() || is_agentdesk_client_params(args.params.get())
+}
+
+fn is_agentdesk_client_params(raw: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|params| {
+            params
+                .get("clientIdentifier")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("agentdesk")
 }
 
 async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
@@ -94,10 +112,11 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         results.push(scan);
     }
 
-    // Auto-install default-skills entries that aren't already installed.
     let t_auto = std::time::Instant::now();
-    let session_id = super::parse_session_id(args);
-    auto_install_defaults(agent, &sources, &results, session_id.as_ref(), false).await;
+    if !suppress_default_install(agent, args) {
+        let session_id = super::parse_session_id(args);
+        auto_install_defaults(agent, &sources, &results, session_id.as_ref(), false).await;
+    }
     xai_grok_telemetry::unified_log::info(
         "marketplace handle_list: complete",
         None,
@@ -145,10 +164,11 @@ async fn handle_action(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 }
                 refreshed += 1;
             }
-
-            // Refresh default-skills from all sources.
-            let scan_results: Vec<_> = sources.iter().map(|source| scan_source(source).0).collect();
-            auto_install_defaults(agent, &sources, &scan_results, Some(&sid), true).await;
+            if !suppress_default_install(agent, args) {
+                let scan_results: Vec<_> =
+                    sources.iter().map(|source| scan_source(source).0).collect();
+                auto_install_defaults(agent, &sources, &scan_results, Some(&sid), true).await;
+            }
 
             let msg = if errors.is_empty() {
                 format!("Refreshed {refreshed} source(s).")
@@ -647,20 +667,17 @@ async fn auto_install_defaults(
     let mut any_changed = false;
 
     for (source, scan) in sources.iter().zip(results.iter()) {
-        // Find the default-skills entry.
         let default_entry = scan
             .plugins
             .iter()
-            .find(|p| p.relative_path == "default-skills");
+            .find(|plugin| plugin.relative_path == "default-skills");
         let Some(entry) = default_entry else {
             continue;
         };
-        // Skip if no components.
         if entry.skill_count == 0 && !entry.has_hooks && !entry.has_agents && !entry.has_mcp {
             continue;
         }
 
-        // Resolve marketplace root.
         let marketplace_lease;
         let marketplace_root = match &source.kind {
             xai_grok_plugin_marketplace::SourceKind::Local { path } => {
@@ -689,24 +706,21 @@ async fn auto_install_defaults(
             }
         };
 
-        // Check if already installed.
-        let mut reg = xai_grok_agent::plugins::install_registry::InstallRegistry::load();
+        let mut registry = xai_grok_agent::plugins::install_registry::InstallRegistry::load();
         let existing = installer::find_installed_marketplace_plugin(
-            &reg,
+            &registry,
             &scan.source_url_or_path,
             "default-skills",
         );
         if existing.is_some() && !force_refresh {
-            // Already installed and not forcing refresh — skip.
             continue;
         }
-        // Remove old copy if present (refresh or reinstall).
         if let Some((existing_key, _)) = existing {
-            let old_dir = reg.install_dir().join(&existing_key);
-            let _ = std::fs::remove_dir_all(&old_dir);
-            reg.remove(&existing_key);
-            let _ = reg.save();
-            reg = xai_grok_agent::plugins::install_registry::InstallRegistry::load();
+            let old_directory = registry.install_dir().join(&existing_key);
+            let _ = std::fs::remove_dir_all(&old_directory);
+            registry.remove(&existing_key);
+            let _ = registry.save();
+            registry = xai_grok_agent::plugins::install_registry::InstallRegistry::load();
         }
 
         let provenance = xai_grok_agent::plugins::install_registry::MarketplaceProvenance {
@@ -714,12 +728,11 @@ async fn auto_install_defaults(
             source_display_name: source.name.clone(),
             plugin_subdir: "default-skills".to_string(),
         };
-
         let install_result = installer::install_from_marketplace(
             &marketplace_root,
             "default-skills",
             provenance,
-            &mut reg,
+            &mut registry,
         );
         drop(marketplace_lease);
         if let Ok(installer::MarketplaceInstallResult::Installed { repo_key }) = install_result {
@@ -732,10 +745,9 @@ async fn auto_install_defaults(
         }
     }
 
-    // Trigger plugin reload if we auto-installed anything.
-    if any_changed && let Some(sid) = session_id {
+    if any_changed && let Some(session_id) = session_id {
         let _ = agent
-            .execute_plugins_action(sid, xai_hooks_plugins_types::PluginsAction::Reload)
+            .execute_plugins_action(session_id, xai_hooks_plugins_types::PluginsAction::Reload)
             .await;
     }
 }
@@ -1377,6 +1389,20 @@ pub fn ensure_official_marketplace_source(grok_home: &std::path::Path) {
 #[cfg(test)]
 mod official_source_tests {
     use super::*;
+
+    #[test]
+    fn agentdesk_client_identifier_is_exact_and_fail_closed() {
+        assert!(is_agentdesk_client_params(
+            r#"{"sessionId":"session-1","clientIdentifier":"agentdesk"}"#
+        ));
+        assert!(!is_agentdesk_client_params(
+            r#"{"sessionId":"session-1","clientIdentifier":"AgentDesk"}"#
+        ));
+        assert!(!is_agentdesk_client_params(
+            r#"{"sessionId":"session-1","clientIdentifier":7}"#
+        ));
+        assert!(!is_agentdesk_client_params(r#"{"sessionId":"session-1"}"#));
+    }
 
     fn read_sources(
         config_path: &std::path::Path,

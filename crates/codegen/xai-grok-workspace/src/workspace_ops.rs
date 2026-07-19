@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! [`WorkspaceOps`] — dual-mode workspace operations handle.
 //!
 //! Two modes:
@@ -1514,7 +1515,7 @@ impl WorkspaceOps {
         }
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl WorkspaceOps {
     /// Test variant backed by a temp dir.
     ///
@@ -2185,3 +2186,4 @@ mod tests {
         assert_ne!(index_root_for(&handle, None).unwrap(), window_a);
     }
 }
+// Modified by the AgentDesk project for Windows desktop integration and safety support.

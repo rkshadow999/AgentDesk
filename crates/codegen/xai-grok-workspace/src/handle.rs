@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! [`WorkspaceHandle`] -- public handle to a workspace instance.
 use fastrace::future::FutureExt as _;
 use fastrace::local::LocalSpan;
@@ -4300,7 +4301,7 @@ impl WorkspaceHandle {
         )
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl WorkspaceHandle {
     fn test_config(
         root_cwd: std::path::PathBuf,
@@ -9484,3 +9485,4 @@ pub(crate) mod tests {
         );
     }
 }
+// Modified by the AgentDesk project for Windows desktop integration and safety support.

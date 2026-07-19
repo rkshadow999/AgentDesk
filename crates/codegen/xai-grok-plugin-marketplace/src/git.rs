@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Git marketplace source support.
 //!
 //! Provides persistent caching of git marketplace repos.
@@ -114,7 +115,7 @@ fn acquire_cache_lock(lock_path: &Path, timeout: Duration) -> Result<File, Strin
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+            Err(e) if is_cache_lock_contention(&e) => {
                 if Instant::now() >= deadline {
                     return Err(format!(
                         "cache lock timeout after {}s for {}",
@@ -127,6 +128,21 @@ fn acquire_cache_lock(lock_path: &Path, timeout: Duration) -> Result<File, Strin
             Err(e) => return Err(format!("failed to lock cache {}: {e}", lock_path.display())),
         }
     }
+}
+
+fn is_cache_lock_contention(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return true;
+    }
+
+    // LockFileEx reports ERROR_LOCK_VIOLATION rather than WouldBlock when a
+    // second handle in this process tries to lock the same byte range.
+    #[cfg(windows)]
+    if error.raw_os_error() == Some(33) {
+        return true;
+    }
+
+    false
 }
 
 /// Check if the cache was fetched recently enough to skip fetching.
@@ -400,7 +416,10 @@ mod tests {
 
         let start = Instant::now();
         let err = acquire_cache_lock(&lock_path, Duration::from_millis(50)).unwrap_err();
-        assert!(err.contains("cache lock timeout"));
+        assert!(
+            err.contains("cache lock timeout"),
+            "unexpected lock error: {err}"
+        );
         assert!(start.elapsed() >= Duration::from_millis(50));
         drop(lease);
         let _lock = acquire_cache_lock(&lock_path, Duration::from_millis(1)).unwrap();

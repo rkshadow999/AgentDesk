@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private vulnerability reporting / 私有漏洞报告
+    url: https://github.com/rkshadow999/AgentDesk/security/advisories/new
+    about: Report credentials, permission bypasses, sandbox failures, and other sensitive security issues privately. / 私下报告凭据、权限绕过、沙箱失效等敏感安全问题。
+  - name: Questions and ideas / 问答与想法
+    url: https://github.com/rkshadow999/AgentDesk/discussions
+    about: Ask usage questions or discuss an early idea before filing a scoped issue. / 提交范围明确的 Issue 前，可先讨论使用问题或早期想法。

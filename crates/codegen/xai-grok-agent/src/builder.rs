@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! AgentBuilder — fluent construction API for building Agents.
 use crate::agent::Agent;
 use crate::compaction::CompactionPolicy;
@@ -12,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use xai_grok_tools::bridge::ToolBridge;
 use xai_grok_tools::computer::types::{AsyncFileSystem, TerminalBackend};
+use xai_grok_tools::implementations::grok_build::task::types::SubagentCapabilityModeExt;
 use xai_grok_tools::notification::ToolNotificationHandle;
 use xai_grok_tools::registry::types::SessionContext;
 use xai_grok_tools::types::tool::ToolKind;
@@ -1003,6 +1005,9 @@ impl AgentBuilder {
                     params.insert("auto_background_on_timeout".into(), false.into());
                 }
             }
+        }
+        if let Some(mode) = definition.capability_mode {
+            mode.filter_tool_config(&mut tool_config);
         }
         let use_backend_search = self.backend_search;
         let web_search_enabled = self.web_search_config.is_enabled();

@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use crate::test_support::lsp_runtime::{
@@ -115,6 +116,506 @@ fn subagent_max_turns_definition_wins_else_inherits_parent() {
     assert_eq!(super::resolve_subagent_max_turns(Some(2), Some(5)), Some(2));
     assert_eq!(super::resolve_subagent_max_turns(None, Some(5)), Some(5));
 }
+
+#[test]
+fn agentdesk_strict_worktree_policy_isolates_write_capable_subagents() {
+    use xai_tool_types::SubagentIsolationMode;
+
+    assert_eq!(
+        resolve_agentdesk_subagent_isolation(
+            Some("strict"),
+            SubagentIsolationMode::None,
+        ),
+        SubagentIsolationMode::Worktree,
+    );
+    assert_eq!(
+        resolve_agentdesk_subagent_isolation(
+            Some("unexpected"),
+            SubagentIsolationMode::None,
+        ),
+        SubagentIsolationMode::None,
+    );
+}
+
+#[test]
+fn agentdesk_strict_worktree_policy_isolates_builtin_readonly_agents() {
+    use xai_tool_types::SubagentIsolationMode;
+
+    for agent_name in ["explore", "plan"] {
+        assert_eq!(
+            resolve_agentdesk_subagent_isolation(
+                Some("strict"),
+                SubagentIsolationMode::None,
+            ),
+            SubagentIsolationMode::Worktree,
+            "strict mode must isolate builtin readonly agent '{agent_name}'",
+        );
+    }
+}
+
+#[test]
+fn agentdesk_strict_worktree_policy_isolates_project_shadows_of_builtin_readonly_agents() {
+    use xai_grok_agent::config::AgentScope;
+    use xai_grok_tools::types::tool::ToolKind;
+    use xai_tool_types::SubagentIsolationMode;
+
+    let project = tempfile::tempdir().expect("temp project");
+    let agents_dir = project.path().join(".grok").join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("create project agents directory");
+    for name in ["explore", "plan"] {
+        std::fs::write(
+            agents_dir.join(format!("{name}.md")),
+            format!(
+                "---\nname: {name}\ndescription: project shadow with write access\ntools: [Bash, Edit, Write]\n---\n\nShadowed agent.\n"
+            ),
+        )
+        .expect("write project agent");
+    }
+
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_cwd = project.path().to_path_buf();
+    for name in ["explore", "plan"] {
+        let definition = resolve_agent_definition(name, &ctx).expect("shadow resolves");
+        assert_eq!(definition.scope, AgentScope::Project);
+        assert!(definition.tool_config.tools.iter().any(|tool| {
+            matches!(
+                tool.kind,
+                Some(ToolKind::Execute | ToolKind::Edit | ToolKind::Write)
+            )
+        }));
+        assert_eq!(
+            resolve_agentdesk_subagent_isolation(
+                Some("strict"),
+                SubagentIsolationMode::None,
+            ),
+            SubagentIsolationMode::Worktree,
+            "project shadow '{name}' must not share the parent worktree",
+        );
+    }
+}
+
+#[test]
+fn agentdesk_strict_worktree_policy_preserves_explicit_isolation() {
+    use xai_tool_types::SubagentIsolationMode;
+
+    assert_eq!(
+        resolve_agentdesk_subagent_isolation(
+            Some("strict"),
+            SubagentIsolationMode::Worktree,
+        ),
+        SubagentIsolationMode::Worktree,
+    );
+}
+
+#[tokio::test]
+async fn readonly_capability_is_reapplied_after_agent_builder_injections() {
+    use xai_grok_agent::{AgentBuilder, config::AgentDefinition};
+    use xai_grok_tools::{
+        computer::local::LocalTerminalBackend,
+        notification::ToolNotificationHandle,
+    };
+    use xai_tool_types::SubagentCapabilityMode;
+
+    let mut definition = AgentDefinition::general_purpose();
+    definition.capability_mode = Some(SubagentCapabilityMode::ReadOnly);
+    let agent = AgentBuilder::new(
+        std::env::temp_dir(),
+        Arc::new(LocalTerminalBackend::new()),
+        ToolNotificationHandle::noop(),
+    )
+    .from_definition(definition)
+    .with_write_file_enabled(true)
+    .build()
+    .await
+    .expect("read-only agent should build");
+    let tool_names: Vec<String> = agent
+        .tool_definitions()
+        .await
+        .iter()
+        .map(|tool| tool.function.name.clone())
+        .collect();
+    for forbidden in ["run_terminal_cmd", "run_terminal_command", "search_replace", "write"] {
+        assert!(
+            !tool_names.iter().any(|name| name == forbidden),
+            "read-only capability must remove '{forbidden}' after builder injections: {tool_names:?}",
+        );
+    }
+}
+
+#[test]
+fn agentdesk_strict_worktree_failures_abort_instead_of_sharing() {
+    assert_eq!(
+        agentdesk_worktree_failure_action(true),
+        AgentDeskWorktreeFailureAction::Abort,
+    );
+    assert_eq!(
+        agentdesk_worktree_failure_action(false),
+        AgentDeskWorktreeFailureAction::Share,
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(agentdesk_subagent_worktree_env)]
+async fn agentdesk_strict_resume_rejects_parent_workspace_as_saved_worktree() {
+    xai_test_utils::require_git!();
+    use xai_test_utils::git::{git_commit_all, init_git_repo};
+
+    let _mode = crate::env::EnvVarGuard::set(
+        AGENTDESK_SUBAGENT_WORKTREE_MODE_ENV,
+        "strict",
+    );
+    let temp = tempfile::TempDir::new().expect("temp root");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    init_git_repo(&repo);
+    std::fs::write(repo.join("tracked.txt"), "initial").expect("write tracked file");
+    git_commit_all(&repo, "initial");
+
+    let source_id = "strict-parent-workspace-source";
+    let mut coordinator = SubagentCoordinator::new();
+    coordinator.completed.insert(
+        source_id.into(),
+        CompletedSubagent {
+            subagent_id: source_id.into(),
+            parent_session_id: "test-parent".into(),
+            parent_prompt_id: None,
+            child_session_id: source_id.into(),
+            description: "unsafe resume source".into(),
+            subagent_type: "explore".into(),
+            persona: None,
+            started_at: std::time::Instant::now(),
+            completed_at: std::time::Instant::now(),
+            result: SubagentResult {
+                success: true,
+                subagent_id: source_id.into(),
+                child_session_id: source_id.into(),
+                ..Default::default()
+            },
+            resumed_from: None,
+            child_cwd: repo.to_string_lossy().into_owned(),
+            worktree_path: Some(repo.clone()),
+            snapshot_ref: None,
+            effective_model_id: "test".into(),
+            block_waited: false,
+            explicitly_killed: false,
+        },
+    );
+    let coordinator = std::cell::RefCell::new(coordinator);
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_cwd = repo.clone();
+    ctx.parent_session_info = Some(SessionInfo {
+        id: acp::SessionId::new("test-parent"),
+        cwd: repo.to_string_lossy().into_owned(),
+    });
+    let gateway = test_gateway();
+    let (mut request, result_rx) = make_request("explore");
+    request.resume_from = Some(source_id.into());
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            Box::pin(handle_subagent_request(request, ctx, &coordinator, &gateway)).await;
+        })
+        .await;
+    let result = result_rx.await.expect("strict resume result");
+    assert!(!result.success, "unsafe strict resume must fail");
+    let error = result.error.as_deref().unwrap_or_default();
+    assert!(
+        error.contains("strict worktree isolation could not restore"),
+        "strict resume reused the parent workspace instead of failing closed: {error}",
+    );
+}
+
+#[test]
+fn agentdesk_non_strict_resume_preserves_existing_shared_workspace_behavior() {
+    let temp = tempfile::TempDir::new().expect("temp root");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_cwd = repo.clone();
+
+    assert_eq!(
+        resolve_agentdesk_reused_worktree(false, &repo, &ctx).expect("non-strict reuse"),
+        repo,
+    );
+}
+
+#[test]
+fn agentdesk_strict_resume_rejects_saved_path_beneath_parent_workspace() {
+    let temp = tempfile::TempDir::new().expect("temp root");
+    let repo = temp.path().join("repo");
+    let nested = repo.join("nested");
+    std::fs::create_dir_all(&nested).expect("create nested path");
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_cwd = repo;
+
+    assert!(
+        resolve_agentdesk_reused_worktree(true, &nested, &ctx).is_err(),
+        "strict resume accepted a path beneath the parent workspace",
+    );
+}
+
+#[cfg(windows)]
+#[test]
+#[serial_test::serial]
+fn agentdesk_strict_resume_rejects_junction_to_parent_workspace() {
+    xai_test_utils::require_git!();
+    use xai_test_utils::git::init_git_repo;
+
+    let temp = tempfile::TempDir::new().expect("temp root");
+    let grok_home = temp.path().join("grok-home");
+    let _home = crate::env::EnvVarGuard::set(
+        "GROK_HOME",
+        grok_home.to_str().expect("utf-8 grok home"),
+    );
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    init_git_repo(&repo);
+    let base = crate::session::worktree::worktree_base_dir_for_source(&repo)
+        .expect("managed base");
+    std::fs::create_dir_all(&base).expect("create managed base");
+    let junction = base.join("subagent-junction");
+    let status = std::process::Command::new("cmd")
+        .args([
+            "/C",
+            "mklink",
+            "/J",
+            junction.to_str().expect("utf-8 junction"),
+            repo.to_str().expect("utf-8 repo"),
+        ])
+        .status()
+        .expect("create junction");
+    assert!(status.success(), "failed to create test junction");
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_cwd = repo;
+
+    let result = resolve_agentdesk_reused_worktree(true, &junction, &ctx);
+    std::fs::remove_dir(&junction).expect("remove junction");
+    assert!(result.is_err(), "strict resume accepted a junction to the parent workspace");
+}
+
+#[test]
+#[serial_test::serial]
+fn agentdesk_strict_resume_rejects_non_git_directory_in_managed_base() {
+    xai_test_utils::require_git!();
+    use xai_test_utils::git::init_git_repo;
+
+    let temp = tempfile::TempDir::new().expect("temp root");
+    let grok_home = temp.path().join("grok-home");
+    let _home = crate::env::EnvVarGuard::set(
+        "GROK_HOME",
+        grok_home.to_str().expect("utf-8 grok home"),
+    );
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    init_git_repo(&repo);
+    let base = crate::session::worktree::worktree_base_dir_for_source(&repo)
+        .expect("managed base");
+    let dest = base.join("subagent-not-git");
+    std::fs::create_dir_all(&dest).expect("create fake worktree");
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_cwd = repo;
+
+    assert!(
+        resolve_agentdesk_reused_worktree(true, &dest, &ctx).is_err(),
+        "strict resume accepted a non-Git directory in the managed base",
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn agentdesk_strict_resume_rejects_unregistered_repository_in_managed_base() {
+    xai_test_utils::require_git!();
+    use xai_test_utils::git::init_git_repo;
+
+    let temp = tempfile::TempDir::new().expect("temp root");
+    let grok_home = temp.path().join("grok-home");
+    let _home = crate::env::EnvVarGuard::set(
+        "GROK_HOME",
+        grok_home.to_str().expect("utf-8 grok home"),
+    );
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    init_git_repo(&repo);
+    let base = crate::session::worktree::worktree_base_dir_for_source(&repo)
+        .expect("managed base");
+    let dest = base.join("subagent-other-repo");
+    std::fs::create_dir_all(&dest).expect("create unexpected repo");
+    init_git_repo(&dest);
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_cwd = repo;
+
+    assert!(
+        resolve_agentdesk_reused_worktree(true, &dest, &ctx).is_err(),
+        "strict resume accepted an unregistered repository",
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn agentdesk_strict_resume_accepts_registered_managed_subagent_worktree() {
+    xai_test_utils::require_git!();
+    use xai_test_utils::git::{git_commit_all, init_git_repo};
+
+    let temp = tempfile::TempDir::new().expect("temp root");
+    let grok_home = temp.path().join("grok-home");
+    let _home = crate::env::EnvVarGuard::set(
+        "GROK_HOME",
+        grok_home.to_str().expect("utf-8 grok home"),
+    );
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    init_git_repo(&repo);
+    std::fs::write(repo.join("tracked.txt"), "initial").expect("write tracked file");
+    git_commit_all(&repo, "initial");
+    let base = crate::session::worktree::worktree_base_dir_for_source(&repo)
+        .expect("managed base");
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_cwd = repo;
+    for (label, mode) in [
+        ("linked", xai_fast_worktree::CreationMode::Linked),
+        ("git", xai_fast_worktree::CreationMode::GitCheckout),
+        ("standalone", xai_fast_worktree::CreationMode::Standalone),
+    ] {
+        let dest = base.join(format!("subagent-valid-{label}"));
+        let report = xai_fast_worktree::WorktreeBuilder::new(&ctx.parent_cwd, &dest)
+            .creation_mode(mode)
+            .worktree_kind(xai_fast_worktree::WorktreeKind::Subagent)
+            .session_id(format!("valid-{label}-source"))
+            .create()
+            .unwrap_or_else(|e| panic!("create registered {label} subagent worktree: {e}"));
+        let resolved = resolve_agentdesk_reused_worktree(true, &report.worktree_path, &ctx)
+            .unwrap_or_else(|e| panic!("registered {label} worktree should validate: {e}"));
+        assert_eq!(
+            resolved,
+            dunce::canonicalize(&report.worktree_path).expect("canonical worktree"),
+            "mode {label}",
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn agentdesk_strict_resume_accepts_worktree_created_from_repo_subdirectory() {
+    xai_test_utils::require_git!();
+    use xai_test_utils::git::{git_commit_all, init_git_repo};
+
+    let temp = tempfile::TempDir::new().expect("temp root");
+    let grok_home = temp.path().join("grok-home");
+    let _home = crate::env::EnvVarGuard::set(
+        "GROK_HOME",
+        grok_home.to_str().expect("utf-8 grok home"),
+    );
+    let repo = temp.path().join("repo");
+    let subdir = repo.join("src");
+    std::fs::create_dir_all(&subdir).expect("create repo subdirectory");
+    init_git_repo(&repo);
+    std::fs::write(repo.join("tracked.txt"), "initial").expect("write tracked file");
+    git_commit_all(&repo, "initial");
+    let base = crate::session::worktree::worktree_base_dir_for_source(&subdir)
+        .expect("managed base");
+    let dest = base.join("subagent-from-subdir");
+    let report = xai_fast_worktree::WorktreeBuilder::new(&subdir, &dest)
+        .creation_mode(xai_fast_worktree::CreationMode::Linked)
+        .worktree_kind(xai_fast_worktree::WorktreeKind::Subagent)
+        .session_id("subdir-source")
+        .create()
+        .expect("create subagent worktree from subdirectory");
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_cwd = subdir;
+
+    resolve_agentdesk_reused_worktree(true, &report.worktree_path, &ctx)
+        .expect("worktree created from a repo subdirectory should validate");
+}
+
+#[test]
+#[serial_test::serial]
+fn agentdesk_strict_resume_accepts_worktree_created_from_parent_linked_worktree() {
+    xai_test_utils::require_git!();
+    use xai_test_utils::git::{git_commit_all, init_git_repo};
+
+    let temp = tempfile::TempDir::new().expect("temp root");
+    let grok_home = temp.path().join("grok-home");
+    let _home = crate::env::EnvVarGuard::set(
+        "GROK_HOME",
+        grok_home.to_str().expect("utf-8 grok home"),
+    );
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    init_git_repo(&repo);
+    std::fs::write(repo.join("tracked.txt"), "initial").expect("write tracked file");
+    git_commit_all(&repo, "initial");
+    let base = crate::session::worktree::worktree_base_dir_for_source(&repo)
+        .expect("managed base");
+    let parent = base.join("parent-linked");
+    xai_fast_worktree::WorktreeBuilder::new(&repo, &parent)
+        .creation_mode(xai_fast_worktree::CreationMode::Linked)
+        .worktree_kind(xai_fast_worktree::WorktreeKind::Session)
+        .session_id("parent-linked")
+        .create()
+        .expect("create parent linked worktree");
+    let dest = base.join("subagent-from-parent-linked");
+    let report = xai_fast_worktree::WorktreeBuilder::new(&parent, &dest)
+        .creation_mode(xai_fast_worktree::CreationMode::Linked)
+        .worktree_kind(xai_fast_worktree::WorktreeKind::Subagent)
+        .session_id("parent-linked-source")
+        .create()
+        .expect("create subagent worktree from linked parent");
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_cwd = parent;
+
+    resolve_agentdesk_reused_worktree(true, &report.worktree_path, &ctx)
+        .expect("worktree created from a linked parent should validate");
+}
+
+#[cfg(windows)]
+#[test]
+#[serial_test::serial]
+fn agentdesk_strict_resume_accepts_worktree_registered_through_grok_home_junction() {
+    xai_test_utils::require_git!();
+    use xai_test_utils::git::{git_commit_all, init_git_repo};
+
+    let temp = tempfile::TempDir::new().expect("temp root");
+    let real_home = temp.path().join("real-grok-home");
+    std::fs::create_dir(&real_home).expect("create real grok home");
+    let alias_home = temp.path().join("grok-home-alias");
+    let status = std::process::Command::new("cmd")
+        .args([
+            "/C",
+            "mklink",
+            "/J",
+            alias_home.to_str().expect("utf-8 alias home"),
+            real_home.to_str().expect("utf-8 real home"),
+        ])
+        .status()
+        .expect("create grok home junction");
+    assert!(status.success(), "failed to create GROK_HOME test junction");
+    let _home = crate::env::EnvVarGuard::set(
+        "GROK_HOME",
+        alias_home.to_str().expect("utf-8 alias home"),
+    );
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    init_git_repo(&repo);
+    std::fs::write(repo.join("tracked.txt"), "initial").expect("write tracked file");
+    git_commit_all(&repo, "initial");
+    let base = crate::session::worktree::worktree_base_dir_for_source(&repo)
+        .expect("managed base");
+    let dest = base.join("subagent-alias-home");
+    let report = xai_fast_worktree::WorktreeBuilder::new(&repo, &dest)
+        .creation_mode(xai_fast_worktree::CreationMode::Linked)
+        .worktree_kind(xai_fast_worktree::WorktreeKind::Subagent)
+        .session_id("alias-home-source")
+        .create()
+        .expect("create registered worktree through GROK_HOME junction");
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.parent_cwd = repo;
+
+    let result = resolve_agentdesk_reused_worktree(true, &report.worktree_path, &ctx);
+    std::fs::remove_dir(&alias_home).expect("remove GROK_HOME junction");
+    result.expect("worktree registered through GROK_HOME junction should validate");
+}
+
 #[test]
 fn resume_worktree_action_covers_three_outcomes() {
     use super::{ResumeWorktreeAction, resume_worktree_action};

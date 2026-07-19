@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Headless single-turn mode (`grok -p "prompt"`).
 //!
 //! Runs the agent in-process via
@@ -1355,6 +1356,7 @@ fn reap_request_for_key(
         Some(id) => (
             "x.ai/subagent/cancel",
             serde_json::value::to_raw_value(&CancelSubagentRequest {
+                session_id: session_id.0.to_string(),
                 subagent_id: id.to_string(),
             })?,
         ),
@@ -1829,6 +1831,7 @@ mod tests {
         let request = super::reap_request_for_key("subagent:sub-7", &session_id).unwrap();
         assert_eq!(request.method.as_ref(), "x.ai/subagent/cancel");
         let params: serde_json::Value = serde_json::from_str(request.params.get()).unwrap();
+        assert_eq!(params["sessionId"], "sess-1");
         assert_eq!(params["subagentId"], "sub-7");
     }
 

@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! ACP stdio clients for testing grok sessions end-to-end: the typed
 //! [`GrokStdioClient`] (`agent-client-protocol::ClientSideConnection` —
 //! authentication, session lifecycle, permissions, notification streaming) and
@@ -24,20 +25,24 @@ use crate::process::spawn_piped_with_stderr_capture;
 /// from [`test_env_cmd_tokio`] plus the debug-logging kill-list, so the
 /// hermeticity setup exists exactly once for the typed ([`GrokStdioClient`])
 /// and raw ([`RawStdioClient`]) harnesses. `leading_args` go before the
-/// `agent stdio` subcommand (global flags); `extra_env` is applied after the
-/// kill-list so a test can still set e.g. `GROK_DEBUG_LOG=1` explicitly.
+/// `agent` subcommand (global flags), while `agent_args` go between `agent`
+/// and `stdio`; `extra_env` is applied after the kill-list so a test can still
+/// set e.g. `GROK_DEBUG_LOG=1` explicitly.
 fn spawn_agent_process(
     server: &MockInferenceServer,
     cwd: &Path,
     home: &Path,
     extra_env: &[(&str, &str)],
     leading_args: &[&str],
+    agent_args: &[&str],
 ) -> (tokio::process::Child, Arc<std::sync::Mutex<Vec<u8>>>) {
     let binary = grok_binary();
 
     let mut cmd = tokio::process::Command::new(&binary);
     cmd.args(leading_args)
-        .args(["agent", "stdio"])
+        .arg("agent")
+        .args(agent_args)
+        .arg("stdio")
         .current_dir(cwd);
     test_env_cmd_tokio(&mut cmd, &server.url(), home);
     // Hermetic firehose env: clear inherited debug-logging knobs so a test
@@ -113,6 +118,7 @@ impl acp::Client for TestAcpClient {
 /// Child process is killed on drop.
 pub struct GrokStdioClient {
     conn: acp::ClientSideConnection,
+    io_task: tokio::task::JoinHandle<acp::Result<()>>,
     _child: tokio::process::Child,
     home: Option<TempDir>,
     capture: Arc<TextCapture>,
@@ -151,8 +157,45 @@ impl GrokStdioClient {
         extra_env: &[(&str, &str)],
         leading_args: &[&str],
     ) -> Self {
-        let (mut child, stderr) =
-            spawn_agent_process(server, cwd, home.path(), extra_env, leading_args);
+        Self::spawn_with_arguments(server, cwd, home, extra_env, leading_args, &[]).await
+    }
+
+    /// Spawn the exact AgentDesk custom-provider process shape. Credentials
+    /// are delivered later over ACP; memory-only mode is enabled at process
+    /// creation so the bridge cannot persist them.
+    pub async fn spawn_agentdesk(
+        server: &MockInferenceServer,
+        cwd: &Path,
+        home: TempDir,
+        agent_args: &[&str],
+    ) -> Self {
+        Self::spawn_with_arguments(
+            server,
+            cwd,
+            home,
+            &[("GROK_DISABLE_API_KEY_PERSIST", "1")],
+            &[],
+            agent_args,
+        )
+        .await
+    }
+
+    async fn spawn_with_arguments(
+        server: &MockInferenceServer,
+        cwd: &Path,
+        home: TempDir,
+        extra_env: &[(&str, &str)],
+        leading_args: &[&str],
+        agent_args: &[&str],
+    ) -> Self {
+        let (mut child, stderr) = spawn_agent_process(
+            server,
+            cwd,
+            home.path(),
+            extra_env,
+            leading_args,
+            agent_args,
+        );
 
         let outgoing = child.stdin.take().unwrap().compat_write();
         let incoming = child.stdout.take().unwrap().compat();
@@ -166,15 +209,43 @@ impl GrokStdioClient {
         let (conn, handle_io) = acp::ClientSideConnection::new(client, outgoing, incoming, |fut| {
             tokio::task::spawn_local(fut);
         });
-        tokio::task::spawn_local(handle_io);
+        let io_task = tokio::task::spawn_local(handle_io);
 
         Self {
             conn,
+            io_task,
             _child: child,
             home: Some(home),
             capture,
             stderr,
         }
+    }
+
+    /// Deliver a desktop-owned credential before ACP initialization and
+    /// require the versioned bridge to acknowledge it.
+    pub async fn bridge_agentdesk_credential_with_timeout(&self, api_key: &str) {
+        let response = tokio::time::timeout(
+            Duration::from_secs(20),
+            self.ext_method(
+                "agentdesk/v1/credential",
+                serde_json::json!({
+                    "protocolVersion": 1,
+                    "apiKey": api_key,
+                }),
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "AgentDesk credential bridge timed out\nstderr:\n{}",
+                self.stderr()
+            )
+        })
+        .expect("AgentDesk credential bridge failed");
+        let payload: serde_json::Value =
+            serde_json::from_str(response.0.get()).expect("parse AgentDesk credential response");
+        assert_eq!(payload["credentialAccepted"], true);
+        assert_eq!(payload["authMethodId"], "xai.api_key");
     }
 
     /// Initialize and authenticate (picks `api_key` auth method).
@@ -364,6 +435,48 @@ impl GrokStdioClient {
             .unwrap_or_else(|_| panic!("prompt timed out\nstderr:\n{}", self.stderr()))
     }
 
+    /// Close the ACP transport and require the child to terminate normally.
+    ///
+    /// Consuming the client prevents the harness's kill-on-drop fallback from
+    /// masking a sidecar that does not honor EOF on its stdin.
+    pub async fn shutdown_with_timeout(self) -> std::process::ExitStatus {
+        let Self {
+            conn,
+            io_task,
+            mut _child,
+            home: _home,
+            capture: _capture,
+            stderr,
+        } = self;
+
+        drop(conn);
+        io_task.abort();
+        let _ = io_task.await;
+
+        let stderr_diagnostic = || {
+            let stderr_text = String::from_utf8_lossy(&stderr.lock().unwrap()).into_owned();
+            stderr_tail(&stderr_text, 1200).to_owned()
+        };
+
+        match tokio::time::timeout(Duration::from_secs(20), _child.wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(error)) => {
+                panic!(
+                    "failed to wait for sidecar shutdown: {error}\nstderr tail:\n{}",
+                    stderr_diagnostic()
+                )
+            }
+            Err(_) => {
+                let kill_result = _child.kill().await;
+                panic!(
+                    "sidecar did not exit within 20s after ACP stdin closed; \
+                     kill result: {kill_result:?}\nstderr tail:\n{}",
+                    stderr_diagnostic()
+                )
+            }
+        }
+    }
+
     pub async fn load_session_with_timeout(
         &self,
         session_id: &acp::SessionId,
@@ -413,7 +526,7 @@ pub struct RawStdioClient {
 impl RawStdioClient {
     pub async fn spawn(server: &MockInferenceServer, cwd: &Path) -> Self {
         let home = TempDir::new().expect("create temp home");
-        let (mut child, stderr) = spawn_agent_process(server, cwd, home.path(), &[], &[]);
+        let (mut child, stderr) = spawn_agent_process(server, cwd, home.path(), &[], &[], &[]);
 
         let stdin = child.stdin.take().expect("child stdin missing");
         let child_stdout = child.stdout.take().expect("child stdout missing");

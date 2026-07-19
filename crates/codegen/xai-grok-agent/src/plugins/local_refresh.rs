@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Refresh of copied local plugin installs from their live source.
 //!
 //! A local install is a full directory copy under `installed-plugins/` (not a
@@ -68,6 +69,16 @@ fn refresh_local_installs(
     trust: &TrustStore,
     force: bool,
 ) -> RefreshSummary {
+    let home = dirs::home_dir();
+    refresh_local_installs_with_home(registry, trust, force, home.as_deref())
+}
+
+fn refresh_local_installs_with_home(
+    registry: &mut InstallRegistry,
+    trust: &TrustStore,
+    force: bool,
+    home: Option<&Path>,
+) -> RefreshSummary {
     let mut summary = RefreshSummary::default();
     let targets: Vec<RefreshTarget> = registry
         .list()
@@ -95,8 +106,9 @@ fn refresh_local_installs(
         expected,
     } in targets
     {
-        let refreshable =
-            TrustStore::is_config_path_auto_trusted(&source_path) || trust.is_trusted(&source_path);
+        let refreshable = home.is_some_and(|home| {
+            TrustStore::is_config_path_auto_trusted_under(&source_path, home)
+        }) || trust.is_trusted(&source_path);
         if !source_path.is_dir() || !refreshable {
             summary.skipped += 1;
             continue;
@@ -353,6 +365,15 @@ mod tests {
         (tmp, home, guard)
     }
 
+    fn refresh_local_installs_for_test(
+        registry: &mut InstallRegistry,
+        trust: &TrustStore,
+        force: bool,
+        home: &Path,
+    ) -> RefreshSummary {
+        refresh_local_installs_with_home(registry, trust, force, Some(home))
+    }
+
     fn write_plugin_json(dir: &Path, name: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("plugin.json"), format!(r#"{{"name":"{name}"}}"#)).unwrap();
@@ -415,7 +436,7 @@ mod tests {
         assert!(!installed.repo_path.join("agents/new.md").exists());
 
         let trust = TrustStore::load_from(home.join(".grok").join("trusted-plugins"));
-        let summary = refresh_local_installs(&mut registry, &trust, false);
+        let summary = refresh_local_installs_for_test(&mut registry, &trust, false, &home);
         assert_eq!(summary.refreshed, 1, "{summary:?}");
         assert!(installed.repo_path.join("agents/new.md").exists());
     }
@@ -436,7 +457,7 @@ mod tests {
         let snapshot = installed.repo_path.join("agents/old.md");
         let before = std::fs::metadata(&snapshot).unwrap().modified().unwrap();
         let trust = TrustStore::load_from(home.join(".grok").join("trusted-plugins"));
-        let summary = refresh_local_installs(&mut registry, &trust, false);
+        let summary = refresh_local_installs_for_test(&mut registry, &trust, false, &home);
         assert_eq!(summary.refreshed, 0, "{summary:?}");
         assert_eq!(summary.skipped, 1, "{summary:?}");
         let after = std::fs::metadata(&snapshot).unwrap().modified().unwrap();
@@ -463,7 +484,7 @@ mod tests {
         .unwrap();
 
         let trust = TrustStore::load_from(home.join(".grok").join("trusted-plugins"));
-        let summary = refresh_local_installs(&mut registry, &trust, false);
+        let summary = refresh_local_installs_for_test(&mut registry, &trust, false, &home);
         assert_eq!(
             summary.refreshed, 1,
             "rename must trigger refresh: {summary:?}"
@@ -489,7 +510,7 @@ mod tests {
         let trust = TrustStore::load_from(home.join(".grok").join("trusted-plugins"));
         let summary = {
             let _fail = EnvVarGuard::set("XAI_GROK_TEST_FAIL_REFRESH_PROMOTE", "1");
-            refresh_local_installs(&mut registry, &trust, false)
+            refresh_local_installs_for_test(&mut registry, &trust, false, &home)
         };
 
         assert_eq!(summary.errors, 1, "{summary:?}");
@@ -512,7 +533,7 @@ mod tests {
 
         std::fs::write(source.join("extra.txt"), "x").unwrap();
         let trust = TrustStore::load_from(home.join("trusted-plugins"));
-        let summary = refresh_local_installs(&mut registry, &trust, false);
+        let summary = refresh_local_installs_for_test(&mut registry, &trust, false, &home);
         assert_eq!(summary.skipped, 1, "{summary:?}");
         assert_eq!(summary.refreshed, 0, "{summary:?}");
         assert!(!installed.repo_path.join("extra.txt").exists());
@@ -534,7 +555,7 @@ mod tests {
         let installed = register_local_install(&mut registry, &source, None);
 
         write_agent_md(&source, "new");
-        let summary = refresh_local_installs(&mut registry, &trust, false);
+        let summary = refresh_local_installs_for_test(&mut registry, &trust, false, &home);
         assert_eq!(summary.refreshed, 1, "{summary:?}");
         assert!(installed.repo_path.join("agents/new.md").exists());
     }
@@ -553,7 +574,7 @@ mod tests {
         write_agent_md(&workspace.join("plugins/a"), "x");
 
         let trust = TrustStore::load_from(home.join("trusted-plugins"));
-        let summary = refresh_local_installs(&mut registry, &trust, false);
+        let summary = refresh_local_installs_for_test(&mut registry, &trust, false, &home);
         assert_eq!(summary.refreshed, 1, "{summary:?}");
         assert!(installed.repo_path.join("plugins/a/agents/x.md").exists());
 
@@ -585,7 +606,7 @@ mod tests {
 
         std::fs::write(source.join("extra.txt"), "x").unwrap();
         let trust = TrustStore::load_from(home.join("trusted-plugins"));
-        let summary = refresh_local_installs(&mut registry, &trust, false);
+        let summary = refresh_local_installs_for_test(&mut registry, &trust, false, &home);
         assert_eq!(summary.refreshed, 1, "{summary:?}");
         assert!(!installed.repo_path.join("link-out/secret.txt").exists());
         assert!(installed.repo_path.join("extra.txt").exists());
@@ -638,7 +659,7 @@ mod tests {
 
         // force=true so the unchanged-skip can't mask the scope-identity guard.
         let trust = TrustStore::load_from(home.join(".grok").join("trusted-plugins"));
-        let summary = refresh_local_installs(&mut registry, &trust, true);
+        let summary = refresh_local_installs_for_test(&mut registry, &trust, true, &home);
 
         // Root-scope rediscovery would change the plugin set/scope, so keep stale:
         // no refresh, and repo.plugins / repo.kind must be untouched (no corruption).

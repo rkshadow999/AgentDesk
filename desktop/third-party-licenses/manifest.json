@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "packageId": "Microsoft.Windows.SDK.BuildTools",
+      "packageVersion": "10.0.26100.7705",
+      "licenseUrl": "https://aka.ms/WinSDKLicenseURL",
+      "resolvedUrl": "https://download.microsoft.com/download/0/F/F/0FF2B061-47DD-4F55-89B6-FD1D8C44F14D/sdk_license.rtf",
+      "path": "microsoft-windows-sdk/sdk_license.rtf",
+      "sha256": "dd07eb178e00c6bba4148457fc00ff77cd4887eb521d504186fe59c9ec8bbe62"
+    },
+    {
+      "packageId": "Microsoft.Windows.SDK.NET.Ref",
+      "packageVersion": "10.0.26100.57",
+      "licenseUrl": "https://aka.ms/WinSDKLicenseURL",
+      "resolvedUrl": "https://download.microsoft.com/download/0/F/F/0FF2B061-47DD-4F55-89B6-FD1D8C44F14D/sdk_license.rtf",
+      "path": "microsoft-windows-sdk/sdk_license.rtf",
+      "sha256": "dd07eb178e00c6bba4148457fc00ff77cd4887eb521d504186fe59c9ec8bbe62"
+    }
+  ]
+}

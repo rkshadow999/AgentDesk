@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Integration tests for xai-grok-sandbox.
 //!
 //! Note: `Sandbox::apply()` is irreversible and process-wide, so we cannot
@@ -61,6 +62,28 @@ fn test_sandbox_manager_lifecycle() {
     let result = manager.apply(&workspace);
     assert!(result.is_ok());
     // Off profile doesn't actually apply
+    assert!(!manager.is_applied());
+}
+
+#[test]
+#[cfg(not(all(feature = "enforce", unix)))]
+fn required_enforcement_fails_when_the_platform_cannot_apply_a_sandbox() {
+    use xai_grok_sandbox::{ProfileName, SandboxManager};
+
+    let workspace = std::env::current_dir().expect("cwd");
+    // SAFETY: this integration-test process has not started background threads,
+    // and the variable is restored before the test returns.
+    unsafe { std::env::set_var("GROK_SANDBOX_REQUIRE_ENFORCEMENT", "1") };
+    let mut manager = SandboxManager::new(ProfileName::Strict, &workspace);
+
+    let result = manager.apply(&workspace);
+
+    // SAFETY: see the matching set_var above.
+    unsafe { std::env::remove_var("GROK_SANDBOX_REQUIRE_ENFORCEMENT") };
+    assert!(
+        result.is_err(),
+        "strict desktop mode must fail closed when enforcement is unavailable"
+    );
     assert!(!manager.is_applied());
 }
 

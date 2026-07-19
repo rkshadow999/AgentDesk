@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Tool infrastructure for xai-grok-shell.
 //!
 //! All tool execution goes through `xai-grok-tools` via the `ToolBridge`.
@@ -5,6 +6,7 @@
 
 pub mod bridge;
 pub mod config;
+pub mod incremental_bash;
 pub mod notification_bridge;
 pub mod retry;
 pub mod todo;

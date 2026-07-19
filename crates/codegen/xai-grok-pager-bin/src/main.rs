@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 #![allow(
     unused_imports,
     unused_variables,
@@ -30,8 +31,8 @@ use std::env;
 use std::net::SocketAddr;
 use tokio_util::sync::CancellationToken;
 use xai_grok_pager::app::{
-    AgentCmd, Command, HeadlessArgs, LeaderMgmtArgs, LeaderMgmtCommand, LeaderTargetArgs,
-    PagerArgs, join_early_prefetch, resolve_use_leader,
+    AgentCmd, AgentDeskOpenAiBackend, Command, HeadlessArgs, LeaderMgmtArgs, LeaderMgmtCommand,
+    LeaderTargetArgs, PagerArgs, join_early_prefetch, resolve_use_leader,
 };
 use xai_grok_pager::app::{WorkspaceMgmtArgs, WorkspaceMgmtCommand, WorkspaceStartArgs};
 use xai_grok_pager::client_identity::PAGER_CLIENT_VERSION;
@@ -993,6 +994,35 @@ async fn run_agent_command(
             }
         }
     }
+    let agentdesk_profile = match (
+        agent_args.model.as_deref(),
+        agent_args.agentdesk_openai_base_url.as_deref(),
+    ) {
+        (_, None) => None,
+        (Some(model), Some(base_url))
+            if matches!(agent_args.mode.as_ref(), Some(AgentCmd::Stdio)) =>
+        {
+            Some(
+                xai_grok_shell::extensions::agentdesk::OpenAiCompatibleProfile::new_with_backend(
+                    model,
+                    base_url,
+                    agent_args
+                        .agentdesk_openai_backend
+                        .unwrap_or(AgentDeskOpenAiBackend::ChatCompletions)
+                        .as_str(),
+                )?,
+            )
+        }
+        (Some(_), Some(_)) => {
+            anyhow::bail!(
+                "--agentdesk-openai-base-url is supported only with `agent --no-leader ... stdio`"
+            );
+        }
+        (None, Some(_)) => unreachable!("clap requires --model"),
+    };
+    if agentdesk_profile.is_some() {
+        xai_grok_shell::util::config::disable_remote_fetch_for_process();
+    }
     let early_prefetch = xai_grok_shell::agent::models::start_early_prefetch(None);
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
     tokio::task::spawn_blocking(|| {});
@@ -1052,6 +1082,9 @@ async fn run_agent_command(
         agent_config.plugins.cli_plugin_dirs = agent_args.canonical_plugin_dirs();
     }
     apply_agent_endpoint_args(&agent_args, &mut agent_config);
+    if let Some(profile) = agentdesk_profile.as_ref() {
+        profile.apply(&mut agent_config);
+    }
     agent_config.remote_settings = remote_settings.clone();
     agent_config.resolve_runtime_fields(&xai_grok_shell::agent::config::RuntimeResolutionContext {
         raw_config: &raw_config,
@@ -1576,6 +1609,14 @@ fn install_heap_profile_hooks() {
     });
 }
 fn main() {
+    // SAFETY: this is the first statement in main, before hooks, allocators,
+    // runtimes, or any other source of background threads is initialized.
+    if let Err(error) =
+        unsafe { xai_grok_shell::agent::auth_method::capture_desktop_api_key_before_runtime() }
+    {
+        eprintln!("error: failed to remove a persisted desktop API key: {error}");
+        std::process::exit(1);
+    }
     xai_grok_pager_minimal::install();
     #[cfg(all(feature = "jemalloc", unix))]
     xai_grok_pager::memory_release::install_release_hook(purge_jemalloc_retained_pages);

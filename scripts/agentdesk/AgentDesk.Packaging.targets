@@ -1,0 +1,53 @@
+<Project>
+  <ItemGroup Condition="'$(PackageMode)' == 'MSIX' and Exists('$(AgentDeskPackageManifestPath)')">
+    <AppxManifest Remove="@(AppxManifest)" />
+    <AppxManifest Include="$(AgentDeskPackageManifestPath)">
+      <SubType>Designer</SubType>
+    </AppxManifest>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(PackageMode)' == 'MSIX'">
+    <AppxPackagePayload Include="$(TargetDir)App.xbf">
+      <TargetPath>App.xbf</TargetPath>
+    </AppxPackagePayload>
+    <AppxPackagePayload Include="$(TargetDir)MainWindow.xbf">
+      <TargetPath>MainWindow.xbf</TargetPath>
+    </AppxPackagePayload>
+    <AppxPackagePayload Include="$(AgentDeskNativeEnginePath)"
+                        Condition="Exists('$(AgentDeskNativeEnginePath)')">
+      <TargetPath>agentdesk-engine.exe</TargetPath>
+    </AppxPackagePayload>
+    <AppxPackagePayload Include="$(AgentDeskWslEnginePath)"
+                        Condition="Exists('$(AgentDeskWslEnginePath)')">
+      <TargetPath>wsl\agentdesk-engine</TargetPath>
+    </AppxPackagePayload>
+    <AppxPackagePayload Include="$(AgentDeskWslInstallerPath)"
+                        Condition="Exists('$(AgentDeskWslInstallerPath)') and Exists('$(AgentDeskWslEnginePath)')">
+      <TargetPath>Install-AgentDeskWslEngine.ps1</TargetPath>
+    </AppxPackagePayload>
+    <AppxPackagePayload Include="$(AgentDeskLicensePath)"
+                        Condition="Exists('$(AgentDeskLicensePath)')">
+      <TargetPath>LICENSE</TargetPath>
+    </AppxPackagePayload>
+    <AppxPackagePayload Include="$(AgentDeskThirdPartyNoticesPath)"
+                        Condition="Exists('$(AgentDeskThirdPartyNoticesPath)')">
+      <TargetPath>THIRD-PARTY-NOTICES</TargetPath>
+    </AppxPackagePayload>
+    <AppxPackagePayload Include="$(AgentDeskDesktopNoticesPath)"
+                        Condition="Exists('$(AgentDeskDesktopNoticesPath)')">
+      <TargetPath>THIRD-PARTY-NOTICES.md</TargetPath>
+    </AppxPackagePayload>
+    <AppxPackagePayload Include="$(AgentDeskSourceNoticePath)"
+                        Condition="Exists('$(AgentDeskSourceNoticePath)')">
+      <TargetPath>THIRD-PARTY-SOURCE-NOTICE.md</TargetPath>
+    </AppxPackagePayload>
+    <AppxPackagePayload Include="$(AgentDeskSourceNoticeZhCnPath)"
+                        Condition="Exists('$(AgentDeskSourceNoticeZhCnPath)')">
+      <TargetPath>THIRD-PARTY-SOURCE-NOTICE.zh-CN.md</TargetPath>
+    </AppxPackagePayload>
+    <AppxPackagePayload Include="$(AgentDeskSourceRevisionPath)"
+                        Condition="Exists('$(AgentDeskSourceRevisionPath)')">
+      <TargetPath>SOURCE-REVISION.txt</TargetPath>
+    </AppxPackagePayload>
+  </ItemGroup>
+</Project>

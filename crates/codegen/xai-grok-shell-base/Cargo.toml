@@ -9,6 +9,7 @@ description = "Foundation modules for the grok shell crate family: environment p
 # CI default set: builds a single shared rlib per crate, so downstream test
 # targets need the test-only helper surface compiled in.
 default-bazel = []
+test-support = ["xai-grok-env/test-support"]
 
 [dependencies]
 anyhow = { workspace = true }

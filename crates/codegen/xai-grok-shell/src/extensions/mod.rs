@@ -1,3 +1,7 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
+pub mod agentdesk;
+pub mod agentdesk_memory;
+pub mod agentdesk_session;
 pub mod auth;
 pub(crate) mod auth_gate;
 pub mod billing;

@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Project plugin trust management.
 //!
 //! Plugins from project directories (`.grok/plugins/`, `.claude/plugins/`)
@@ -170,6 +171,10 @@ impl TrustStore {
         let Some(home) = dirs::home_dir() else {
             return false;
         };
+        Self::is_config_path_auto_trusted_under(plugin_root, &home)
+    }
+
+    pub(crate) fn is_config_path_auto_trusted_under(plugin_root: &Path, home: &Path) -> bool {
         match dunce::canonicalize(plugin_root) {
             Ok(canonical) => canonical.starts_with(&home),
             Err(_) => false,
@@ -363,3 +368,4 @@ mod tests {
         assert!(!store.is_trusted(&plugin));
     }
 }
+// Modified by the AgentDesk project for Windows desktop integration and safety support.

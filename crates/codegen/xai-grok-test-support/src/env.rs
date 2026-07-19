@@ -1,8 +1,10 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Shared environment helpers: binary resolution, git workdirs, env var setup.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use tempfile::TempDir;
 
@@ -69,15 +71,25 @@ fn local_grok_binary_path() -> PathBuf {
         .join(format!("xai-grok-pager{}", std::env::consts::EXE_SUFFIX))
 }
 
-fn ensure_local_grok_binary(binary: &Path) {
-    if binary.exists() {
-        return;
-    }
+fn grok_binary_build_args() -> Vec<&'static str> {
+    let mut args = vec![
+        "rustc",
+        "--locked",
+        "-p",
+        "xai-grok-pager-bin",
+        "--bin",
+        "xai-grok-pager",
+    ];
+    #[cfg(all(windows, target_env = "msvc"))]
+    args.extend(["--", "-C", "link-arg=/DEBUG:NONE"]);
+    args
+}
 
+fn ensure_local_grok_binary(binary: &Path) {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let output = Command::new(&cargo)
         .current_dir(workspace_root())
-        .args(["build", "-p", "xai-grok-pager", "--bin", "xai-grok-pager"])
+        .args(grok_binary_build_args())
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn {cargo} to build xai-grok-pager: {e}"));
 
@@ -110,9 +122,17 @@ pub fn grok_binary() -> PathBuf {
         }
     }
 
-    let binary = local_grok_binary_path();
-    ensure_local_grok_binary(&binary);
-    binary
+    static LOCAL_BINARY: OnceLock<PathBuf> = OnceLock::new();
+    LOCAL_BINARY
+        .get_or_init(|| {
+            let binary = local_grok_binary_path();
+            // Cargo owns freshness checks instead of trusting a stale pager.
+            // On Windows the final linker override also avoids MSVC's PDB size
+            // limit while preserving the build-script stack reservation.
+            ensure_local_grok_binary(&binary);
+            binary
+        })
+        .clone()
 }
 
 /// Temp dir with a git repo + one committed file.
@@ -155,14 +175,16 @@ pub fn test_env_cmd_tokio(
     mock_url: &str,
     home: &std::path::Path,
 ) {
+    // Grok compatibility imports and plugins also consult Windows profile and
+    // AppData roots, so GROK_HOME alone is not a hermetic test boundary.
+    #[cfg(windows)]
+    cmd.env("USERPROFILE", home)
+        .env("APPDATA", home.join("AppData").join("Roaming"))
+        .env("LOCALAPPDATA", home.join("AppData").join("Local"));
+
     cmd.env("HOME", home)
-        // HOME alone does not sandbox grok on Windows: the product resolves
-        // `~` via `USERPROFILE`/Known Folders (`std::env::home_dir()`), so
-        // without an explicit GROK_HOME every spawned child shares the real
-        // `%USERPROFILE%\.grok` — test 1's models_cache.json (which embeds
-        // its per-test mock-server URL) then poisons every later test's
-        // prompt (the windows-x86_64 lifecycle "prompt timed out" failure).
-        // Mirrors `leader.rs` and the pty-harness `env_for_pager`.
+        // Keep Grok's own caches and session state under the same disposable
+        // profile instead of the developer's real configuration directory.
         .env("GROK_HOME", home.join(".grok"))
         .env("GROK_CLI_CHAT_PROXY_BASE_URL", mock_url)
         .env("GROK_XAI_API_BASE_URL", mock_url)
@@ -174,4 +196,94 @@ pub fn test_env_cmd_tokio(
         // Release binaries (CI lifecycle tests) otherwise spawn a background
         // update check that hits the network and can add latency under Rosetta.
         .env("GROK_DISABLE_AUTOUPDATER", "1");
+
+    // Windows known-folder APIs can ignore USERPROFILE and expose the real
+    // Claude/Cursor configuration to an otherwise isolated child process.
+    // Disable every vendor-compat discovery surface in the test harness so
+    // local MCPs, hooks, rules, and sessions cannot affect release gates.
+    for variable in [
+        "GROK_CLAUDE_SKILLS_ENABLED",
+        "GROK_CLAUDE_RULES_ENABLED",
+        "GROK_CLAUDE_AGENTS_ENABLED",
+        "GROK_CLAUDE_MCPS_ENABLED",
+        "GROK_CLAUDE_HOOKS_ENABLED",
+        "GROK_CLAUDE_SESSIONS_ENABLED",
+        "GROK_CURSOR_SKILLS_ENABLED",
+        "GROK_CURSOR_RULES_ENABLED",
+        "GROK_CURSOR_AGENTS_ENABLED",
+        "GROK_CURSOR_MCPS_ENABLED",
+        "GROK_CURSOR_HOOKS_ENABLED",
+        "GROK_CURSOR_SESSIONS_ENABLED",
+    ] {
+        cmd.env(variable, "false");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::ffi::{OsStr, OsString};
+    use std::path::PathBuf;
+
+    use super::{grok_binary_build_args, local_grok_binary_path, test_env_cmd_tokio};
+
+    #[test]
+    fn local_grok_binary_refreshes_the_pager_bin_with_locked_cargo() {
+        let mut expected = vec![
+            "rustc",
+            "--locked",
+            "-p",
+            "xai-grok-pager-bin",
+            "--bin",
+            "xai-grok-pager",
+        ];
+        #[cfg(all(windows, target_env = "msvc"))]
+        expected.extend(["--", "-C", "link-arg=/DEBUG:NONE"]);
+        assert_eq!(grok_binary_build_args().as_slice(), expected.as_slice());
+        assert_eq!(
+            local_grok_binary_path()
+                .parent()
+                .and_then(std::path::Path::file_name),
+            Some(OsStr::new("debug"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_test_env_redirects_user_config_roots() {
+        let home = tempfile::tempdir().expect("create isolated Windows test profile");
+        let mut cmd = tokio::process::Command::new("cmd.exe");
+        test_env_cmd_tokio(&mut cmd, "http://127.0.0.1:1", home.path());
+
+        let env: HashMap<OsString, Option<OsString>> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(key, value)| (key.to_os_string(), value.map(OsStr::to_os_string)))
+            .collect();
+        let env_path = |key: &str| {
+            env.get(OsStr::new(key))
+                .and_then(|value| value.as_ref())
+                .map(PathBuf::from)
+        };
+
+        assert_eq!(env_path("USERPROFILE"), Some(home.path().to_path_buf()));
+        assert_eq!(
+            env_path("APPDATA"),
+            Some(home.path().join("AppData").join("Roaming"))
+        );
+        assert_eq!(
+            env_path("LOCALAPPDATA"),
+            Some(home.path().join("AppData").join("Local"))
+        );
+        assert_eq!(
+            env.get(OsStr::new("GROK_CLAUDE_MCPS_ENABLED"))
+                .and_then(|value| value.as_deref()),
+            Some(OsStr::new("false"))
+        );
+        assert_eq!(
+            env.get(OsStr::new("GROK_CURSOR_MCPS_ENABLED"))
+                .and_then(|value| value.as_deref()),
+            Some(OsStr::new("false"))
+        );
+    }
 }

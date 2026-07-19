@@ -1,0 +1,64 @@
+* text=auto
+
+# Source and project metadata use repository-stable LF on every host.
+*.rs text eol=lf
+*.cs text eol=lf
+*.proto text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.sql text eol=lf
+
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+*.ndjson text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+*.ps1 text eol=lf
+*.psm1 text eol=lf
+*.psd1 text eol=lf
+*.sh text eol=lf
+
+*.xml text eol=lf
+*.xaml text eol=lf
+*.resw text eol=lf
+*.csproj text eol=lf
+*.props text eol=lf
+*.targets text eol=lf
+*.pubxml text eol=lf
+*.svg text eol=lf
+
+# Visual Studio solutions and legacy Windows command files retain Windows EOLs.
+*.sln text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+LICENSE text eol=lf
+THIRD-PARTY-NOTICES text eol=lf
+.gitattributes text eol=lf
+.gitignore text eol=lf
+
+# Build and visual artifacts are never line-normalized.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.rtf binary
+*.zip binary
+*.gz binary
+*.msix binary
+*.msixbundle binary
+*.dll binary
+*.exe binary
+*.pdb binary

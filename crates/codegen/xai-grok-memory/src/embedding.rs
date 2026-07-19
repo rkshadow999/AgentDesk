@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Embedding provider abstraction for memory vector search.
 //!
 //! Defines the `EmbeddingProvider` trait and an API-based implementation
@@ -214,12 +215,12 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
 
 /// A mock embedding provider for testing that returns deterministic vectors.
 /// Uses blake3 hash of text → float values for reproducible results.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct MockEmbeddingProvider {
     pub dimensions: usize,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl EmbeddingProvider for MockEmbeddingProvider {
     async fn embed_batch(
@@ -281,3 +282,4 @@ mod tests {
         assert_eq!(results[0].len(), 128);
     }
 }
+// Modified by the AgentDesk project for Windows desktop integration and safety support.

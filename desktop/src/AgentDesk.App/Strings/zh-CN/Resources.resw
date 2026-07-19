@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms</value></resheader>
+  <data name="AppTitle.Text" xml:space="preserve"><value>AgentDesk</value></data>
+  <data name="AppEdition.Text" xml:space="preserve"><value>本地工作台</value></data>
+  <data name="LoadingStatus.Text" xml:space="preserve"><value>正在启动</value></data>
+  <data name="LoadingWorkbench.Text" xml:space="preserve"><value>正在加载桌面界面…</value></data>
+  <data name="WorkbenchUnavailable.Text" xml:space="preserve"><value>桌面界面暂不可用</value></data>
+  <data name="EngineNotConnected.Text" xml:space="preserve"><value>引擎未连接</value></data>
+  <data name="NativeProtected.Text" xml:space="preserve"><value>本机兼容（非沙箱）</value></data>
+  <data name="WorkbenchAutomationName" xml:space="preserve"><value>AgentDesk 工作台</value></data>
+  <data name="InspectorAutomationName" xml:space="preserve"><value>AgentDesk 检查器</value></data>
+  <data name="Reload" xml:space="preserve"><value>重新加载</value></data>
+  <data name="WorkspaceNotSelected" xml:space="preserve"><value>未选择工作区</value></data>
+  <data name="DesktopStartFailed" xml:space="preserve"><value>无法启动桌面界面：{0}</value></data>
+  <data name="DesktopNavigationFailed" xml:space="preserve"><value>桌面界面加载失败：{0}</value></data>
+  <data name="InterfaceReady" xml:space="preserve"><value>界面已就绪</value></data>
+  <data name="UnsupportedDesktopMessage" xml:space="preserve"><value>桌面消息格式不受支持。</value></data>
+  <data name="DesktopCommandFailed" xml:space="preserve"><value>桌面命令处理失败。</value></data>
+  <data name="SelectWorkspace" xml:space="preserve"><value>选择工作区</value></data>
+  <data name="EngineConnected" xml:space="preserve"><value>引擎已连接</value></data>
+  <data name="EngineStarting" xml:space="preserve"><value>正在启动引擎</value></data>
+  <data name="TaskRunning" xml:space="preserve"><value>任务正在运行</value></data>
+  <data name="WaitingForTask" xml:space="preserve"><value>等待任务</value></data>
+  <data name="EngineDisconnected" xml:space="preserve"><value>引擎未连接</value></data>
+  <data name="EngineUnavailable" xml:space="preserve"><value>引擎不可用</value></data>
+  <data name="EngineStopped" xml:space="preserve"><value>引擎已停止</value></data>
+  <data name="EngineError" xml:space="preserve"><value>引擎错误</value></data>
+  <data name="InterfaceLoading" xml:space="preserve"><value>正在加载界面</value></data>
+  <data name="ActionRequired" xml:space="preserve"><value>需要处理</value></data>
+  <data name="InterfaceUnavailable" xml:space="preserve"><value>界面不可用</value></data>
+  <data name="LocalWorkbench" xml:space="preserve"><value>本地工作台</value></data>
+  <data name="EngineClosingSafely" xml:space="preserve"><value>正在安全关闭引擎</value></data>
+  <data name="EngineClosing" xml:space="preserve"><value>正在关闭引擎</value></data>
+  <data name="EngineShutdownFailedBody" xml:space="preserve"><value>未能安全停止本地引擎。窗口仍保持打开，请再次关闭以重试。</value></data>
+  <data name="ShutdownFailedRetry" xml:space="preserve"><value>关闭失败，请重试</value></data>
+  <data name="EngineCleanupFailed" xml:space="preserve"><value>引擎清理失败</value></data>
+  <data name="SessionTransferFiles" xml:space="preserve"><value>AgentDesk 会话文件</value></data>
+  <data name="BackupArchiveFiles" xml:space="preserve"><value>AgentDesk 备份文件</value></data>
+  <data name="RestoringBackup" xml:space="preserve"><value>正在安全恢复本地数据</value></data>
+  <data name="ApplicationRestartFailed" xml:space="preserve"><value>数据已处理，但 AgentDesk 无法自动重启。请手动重新打开应用。</value></data>
+  <data name="ProviderCredentialTitle" xml:space="preserve"><value>设置模型服务密钥</value></data>
+  <data name="ProviderCredentialPrompt" xml:space="preserve"><value>API Key（仅在此 Windows 原生窗口中输入）</value></data>
+  <data name="ProviderCredentialInvalid" xml:space="preserve"><value>请输入不含空格的非空 API Key。</value></data>
+  <data name="CloudAccessTokenTitle" xml:space="preserve"><value>连接自托管云</value></data>
+  <data name="CloudAccessTokenPrompt" xml:space="preserve"><value>访问令牌</value></data>
+  <data name="CloudAccessTokenInvalid" xml:space="preserve"><value>请输入不含空格的非空令牌。</value></data>
+  <data name="CloudPairingPassphraseTitle" xml:space="preserve"><value>恢复密钥配对</value></data>
+  <data name="CloudPairingPassphrasePrompt" xml:space="preserve"><value>配对口令</value></data>
+  <data name="CloudPairingPassphraseInvalid" xml:space="preserve"><value>口令长度必须在 16 到 1,024 个字符之间。</value></data>
+  <data name="CloudPairingFiles" xml:space="preserve"><value>AgentDesk 恢复密钥配对包</value></data>
+  <data name="CloudConfirm" xml:space="preserve"><value>继续</value></data>
+  <data name="CloudCancel" xml:space="preserve"><value>取消</value></data>
+  <data name="ExtensionApprovalTitle" xml:space="preserve"><value>允许扩展操作？</value></data>
+  <data name="ExtensionApprovalBody" xml:space="preserve"><value>类型：{0}&#x0A;操作：{1}&#x0A;目标：{2}&#x0A;&#x0A;此操作会修改本地扩展配置或加载代码。仅在你主动发起并信任目标时允许。</value></data>
+  <data name="ExtensionApprovalAllowOnce" xml:space="preserve"><value>仅允许一次</value></data>
+  <data name="ExtensionApprovalDeny" xml:space="preserve"><value>拒绝</value></data>
+  <data name="ExtensionScopeMcp" xml:space="preserve"><value>MCP 服务器</value></data>
+  <data name="ExtensionScopeSkills" xml:space="preserve"><value>技能</value></data>
+  <data name="ExtensionScopeHooks" xml:space="preserve"><value>钩子</value></data>
+  <data name="ExtensionScopePlugins" xml:space="preserve"><value>插件</value></data>
+  <data name="ExtensionScopeMarketplace" xml:space="preserve"><value>插件市场</value></data>
+  <data name="ExtensionActionToggle" xml:space="preserve"><value>切换启用状态</value></data>
+  <data name="ExtensionActionConfigureStdio" xml:space="preserve"><value>配置 stdio 服务器</value></data>
+  <data name="ExtensionActionConfigureHttp" xml:space="preserve"><value>配置 HTTP 服务器</value></data>
+  <data name="ExtensionActionDelete" xml:space="preserve"><value>删除</value></data>
+  <data name="ExtensionActionAddPath" xml:space="preserve"><value>添加路径</value></data>
+  <data name="ExtensionActionRemovePath" xml:space="preserve"><value>移除路径</value></data>
+  <data name="ExtensionActionReset" xml:space="preserve"><value>重置</value></data>
+  <data name="ExtensionActionReload" xml:space="preserve"><value>重新加载</value></data>
+  <data name="ExtensionActionTrust" xml:space="preserve"><value>信任当前项目</value></data>
+  <data name="ExtensionActionUntrust" xml:space="preserve"><value>取消信任当前项目</value></data>
+  <data name="ExtensionActionAdd" xml:space="preserve"><value>添加</value></data>
+  <data name="ExtensionActionRemove" xml:space="preserve"><value>移除</value></data>
+  <data name="ExtensionActionEnable" xml:space="preserve"><value>启用</value></data>
+  <data name="ExtensionActionDisable" xml:space="preserve"><value>禁用</value></data>
+  <data name="ExtensionActionToggleSource" xml:space="preserve"><value>切换来源状态</value></data>
+  <data name="ExtensionActionInstall" xml:space="preserve"><value>安装</value></data>
+  <data name="ExtensionActionUpdate" xml:space="preserve"><value>更新</value></data>
+  <data name="ExtensionActionUninstall" xml:space="preserve"><value>卸载</value></data>
+  <data name="WindowsAutomationApprovalTitle" xml:space="preserve"><value>允许 Windows UI 自动化？</value></data>
+  <data name="WindowsAutomationApprovalBody" xml:space="preserve"><value>操作：{0}&#x0A;进程 ID：{1}&#x0A;目标：{2}&#x0A;值长度：{3} 个字符&#x0A;&#x0A;此原生 Windows 操作可以控制其他应用。仅在你主动发起并信任目标时允许。</value></data>
+  <data name="WindowsAutomationActionFocus" xml:space="preserve"><value>聚焦窗口</value></data>
+  <data name="WindowsAutomationActionInvoke" xml:space="preserve"><value>调用控件</value></data>
+  <data name="WindowsAutomationActionSetValue" xml:space="preserve"><value>设置控件值</value></data>
+  <data name="WindowsAutomationAllowOnce" xml:space="preserve"><value>仅允许一次</value></data>
+  <data name="WindowsAutomationDeny" xml:space="preserve"><value>拒绝</value></data>
+</root>

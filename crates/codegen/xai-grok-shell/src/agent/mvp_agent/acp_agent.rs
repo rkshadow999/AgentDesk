@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 #![cfg_attr(rustfmt, rustfmt::skip)]
 #![allow(unused_imports)]
 //! [`acp::Agent`] trait implementation for [`MvpAgent`].
@@ -186,7 +187,8 @@ impl acp::Agent for MvpAgent {
                 ),
             ),
         );
-        if !self.cfg.borrow().grok_com_config.api_key_auth_disabled()
+        if !crate::auth::api_key_persistence_disabled()
+            && !self.cfg.borrow().grok_com_config.api_key_auth_disabled()
             && auth_method::read_xai_api_key_env().is_err()
             && let Some(api_key) = crate::auth::read_api_key(
                 &crate::util::grok_home::grok_home(),
@@ -481,7 +483,27 @@ impl acp::Agent for MvpAgent {
                     );
                 }
                 let mut sampling_config = self.sampling_config.borrow_mut();
-                if sampling_config.api_key.is_none() {
+                if crate::auth::api_key_persistence_disabled() {
+                    if let Ok(api_key) = auth_method::read_xai_api_key_env() {
+                        sampling_config.api_key = Some(api_key);
+                        tracing::info!(
+                            "auth: loaded memory-only API key captured before runtime startup"
+                        );
+                    } else if !self
+                        .models_manager
+                        .models()
+                        .values()
+                        .any(|m| m.has_own_credentials())
+                    {
+                        emit_login_span(false, "api_key", None, Some("no_credentials"));
+                        return Err(
+                            acp::Error::auth_required()
+                                .data(
+                                    "Set XAI_API_KEY or add api_key/env_key to config.toml.",
+                                ),
+                        );
+                    }
+                } else if sampling_config.api_key.is_none() {
                     if let Ok(api_key) = auth_method::read_xai_api_key_env() {
                         sampling_config.api_key = Some(api_key.clone());
                         if let Err(e) = crate::auth::store_api_key(
@@ -3161,6 +3183,158 @@ impl acp::Agent for MvpAgent {
         let mut backend_no_bridge_err: Option<acp::Error> = None;
         let method = args.method.clone();
         let result = match method.as_ref() {
+            "agentdesk/v1/credential" => {
+                let params: serde_json::Value = serde_json::from_str(args.params.get())
+                    .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
+                if params.get("protocolVersion").and_then(|value| value.as_u64())
+                    != Some(crate::extensions::agentdesk::PROTOCOL_VERSION)
+                {
+                    return Err(
+                        acp::Error::invalid_params()
+                            .data("unsupported AgentDesk credential protocol version"),
+                    );
+                }
+                let api_key = params
+                    .get("apiKey")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        acp::Error::invalid_params()
+                            .data("the AgentDesk credential request requires apiKey")
+                    })?;
+                crate::extensions::agentdesk::credential_response(api_key)
+            }
+            "agentdesk/v1/initialize" => {
+                let params: serde_json::Value = serde_json::from_str(args.params.get())
+                    .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
+                if params.get("protocolVersion").and_then(|value| value.as_u64())
+                    != Some(crate::extensions::agentdesk::PROTOCOL_VERSION)
+                {
+                    return Err(
+                        acp::Error::invalid_params()
+                            .data("unsupported AgentDesk extension protocol version"),
+                    );
+                }
+                let response = crate::extensions::agentdesk::initialize_response()?;
+                self.mark_agentdesk_extension_initialized();
+                Ok(response)
+            }
+            "agentdesk/v1/health" => crate::extensions::agentdesk::health_response(),
+            method if method.starts_with("agentdesk/v1/memory/") => {
+                crate::extensions::agentdesk_memory::handle(self, &args).await
+            }
+            "agentdesk/v1/session/export" => {
+                let request: crate::extensions::agentdesk_session::SessionTransferExportRequest =
+                    crate::extensions::parse_params(&args)?;
+                crate::extensions::agentdesk_session::validate_session_id(
+                    &request.session_id,
+                )
+                .map_err(|error| {
+                    acp::Error::invalid_params().data(error.to_string())
+                })?;
+                let session_id = acp::SessionId::new(request.session_id.clone());
+                let document = if let Some(handle) = self.get_session_handle(&session_id) {
+                    let cwd = handle.info.cwd.clone();
+                    let (tx, rx) = oneshot::channel();
+                    handle
+                        .cmd_tx
+                        .send(SessionCommand::CopyFile { respond_to: tx })
+                        .map_err(|_| {
+                            acp::Error::internal_error()
+                                .data("failed to flush the session before export")
+                        })?;
+                    let snapshot = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        rx,
+                    )
+                    .await
+                    .map_err(|_| {
+                        acp::Error::internal_error()
+                            .data("timed out while flushing the session before export")
+                    })?
+                    .map_err(|_| {
+                        acp::Error::internal_error()
+                            .data("the session export channel closed unexpectedly")
+                    })?
+                    .map_err(|_| {
+                        acp::Error::internal_error()
+                            .data("failed to snapshot the session for export")
+                    })?;
+                    let export_id = request.session_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::extensions::agentdesk_session::export_session_document_from_files(
+                            &export_id,
+                            &cwd,
+                            snapshot.files,
+                        )
+                    })
+                    .await
+                    .map_err(|_| {
+                        acp::Error::internal_error()
+                            .data("the session export worker failed")
+                    })?
+                } else {
+                    let export_id = request.session_id.clone();
+                    let session_dir = crate::session::persistence::find_session_dir_by_id(
+                        &export_id,
+                    )
+                    .ok_or_else(|| {
+                        acp::Error::invalid_params().data("the session was not found")
+                    })?;
+                    tokio::task::spawn_blocking(move || {
+                        crate::extensions::agentdesk_session::export_session_document_from_directory(
+                            &export_id,
+                            &session_dir,
+                        )
+                    })
+                    .await
+                    .map_err(|_| {
+                        acp::Error::internal_error()
+                            .data("the session export worker failed")
+                    })?
+                }
+                .map_err(|error| {
+                    if error.is_invalid() {
+                        acp::Error::invalid_params().data(error.to_string())
+                    } else {
+                        acp::Error::internal_error().data(error.to_string())
+                    }
+                })?;
+                crate::extensions::to_raw_response(
+                    &crate::extensions::agentdesk_session::SessionTransferExportResponse {
+                        schema_version: crate::extensions::agentdesk_session::SESSION_TRANSFER_SCHEMA_VERSION,
+                        session: document,
+                    },
+                )
+            }
+            "agentdesk/v1/session/import" => {
+                let request: crate::extensions::agentdesk_session::SessionTransferImportRequest =
+                    crate::extensions::parse_params(&args)?;
+                let root = crate::util::grok_home::grok_home();
+                let import = tokio::task::spawn_blocking(move || {
+                    crate::extensions::agentdesk_session::import_session_document_to_root(
+                        &request.session,
+                        &request.cwd,
+                        root,
+                    )
+                })
+                .await
+                .map_err(|_| {
+                    acp::Error::internal_error().data("the session import worker failed")
+                })?
+                .map_err(|error| {
+                    if error.is_invalid() {
+                        acp::Error::invalid_params().data(error.to_string())
+                    } else {
+                        acp::Error::internal_error().data(error.to_string())
+                    }
+                })?;
+                crate::extensions::to_raw_response(
+                    &crate::extensions::agentdesk_session::SessionTransferImportResponse {
+                        schema_version: crate::extensions::agentdesk_session::SESSION_TRANSFER_SCHEMA_VERSION,
+                        session_id: import.session_id,
+                    },
+                )
+            }
             "x.ai/getApiKey" | "x.ai/setApiKey" => {
                 crate::extensions::auth::handle(self, &args).await
             }

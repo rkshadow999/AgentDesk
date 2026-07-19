@@ -377,4 +377,4 @@ Resolve every Critical and Important finding, then rerun affected tests and the 
 git push -u origin feature/agentdesk-beta-plan-mode
 ```
 
-Expected: the branch is visible in `rkshadow/AgentDesk` and CI starts. Do not merge until CI and review pass.
+Expected: the branch is visible in `rkshadow999/AgentDesk` and CI starts. Do not merge until CI and review pass.

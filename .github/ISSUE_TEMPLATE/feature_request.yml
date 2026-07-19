@@ -1,0 +1,61 @@
+name: Feature request / 功能建议
+description: Propose a focused AgentDesk improvement / 提出范围明确的 AgentDesk 改进
+title: "[Feature]: "
+labels:
+  - enhancement
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        AgentDesk is local-first and security boundaries must remain explicit. Describe the user problem before prescribing an implementation.
+
+        AgentDesk 坚持本地优先，并要求安全边界清晰可见。请先描述用户问题，再说明建议实现。
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem / 用户问题
+      description: Who is blocked, and in which workflow? / 哪类用户在什么工作流中受阻？
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome / 期望结果
+      description: Describe observable behavior and completion criteria / 描述可观察行为与验收条件
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area / 范围
+      options:
+        - Desktop host / 桌面宿主
+        - Web workbench or inspector / Web 工作台或检查器
+        - Rust sidecar or ACP contract / Rust sidecar 或 ACP 契约
+        - Packaging or release / 打包或发布
+        - Optional self-hosted cloud / 可选自托管云端
+        - Documentation or accessibility / 文档或无障碍
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach / 建议方案
+      description: Include alternatives and tradeoffs when known / 如已了解，请列出替代方案与取舍
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Security, privacy, and compatibility / 安全、隐私与兼容性
+      description: Identify changed trust boundaries, uploaded data, permissions, or migration needs / 说明变化的信任边界、上传数据、权限或迁移需求
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmation / 确认
+      options:
+        - label: I searched the roadmap and existing issues. / 我已搜索路线图和现有 Issue。
+          required: true
+        - label: The local-only workflow remains usable, or I explained why that is impossible. / 本地独立工作流仍可用，或我已说明无法保留的原因。
+          required: true

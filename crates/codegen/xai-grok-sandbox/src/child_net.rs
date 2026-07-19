@@ -1,4 +1,50 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Per-child seccomp network filter. No-op on non-Linux.
+
+#[cfg(target_os = "linux")]
+fn blocked_network_syscalls() -> &'static [i64] {
+    &[
+        libc::SYS_socket,
+        libc::SYS_socketpair,
+        libc::SYS_connect,
+        libc::SYS_bind,
+        libc::SYS_sendto,
+        libc::SYS_sendmsg,
+        libc::SYS_sendmmsg,
+        libc::SYS_recvfrom,
+        libc::SYS_recvmsg,
+        libc::SYS_recvmmsg,
+        libc::SYS_listen,
+        libc::SYS_accept,
+        libc::SYS_accept4,
+        libc::SYS_shutdown,
+        libc::SYS_io_uring_setup,
+        libc::SYS_io_uring_enter,
+        libc::SYS_io_uring_register,
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn native_audit_arch() -> Option<u32> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        return Some(0xC000_003E);
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        return Some(0xC000_00B7);
+    }
+    #[cfg(target_arch = "x86")]
+    {
+        return Some(0x4000_0003);
+    }
+    #[cfg(target_arch = "arm")]
+    {
+        return Some(0x4000_0028);
+    }
+    #[allow(unreachable_code)]
+    None
+}
 
 /// Install seccomp BPF filter blocking network syscalls.
 ///
@@ -9,8 +55,8 @@
 pub unsafe fn install_child_network_filter() -> std::io::Result<()> {
     use libc::{
         BPF_ABS, BPF_JEQ, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W, PR_SET_NO_NEW_PRIVS,
-        PR_SET_SECCOMP, SECCOMP_MODE_FILTER, SYS_accept, SYS_accept4, SYS_bind, SYS_connect,
-        SYS_listen, SYS_sendmsg, SYS_sendto, prctl, sock_filter, sock_fprog,
+        PR_SET_SECCOMP, SECCOMP_MODE_FILTER, SECCOMP_RET_KILL_PROCESS, prctl, sock_filter,
+        sock_fprog,
     };
 
     const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
@@ -39,22 +85,25 @@ pub unsafe fn install_child_network_filter() -> std::io::Result<()> {
         };
     }
 
-    const NR_OFFSET: u32 = 0; // seccomp_data.nr offset
-
-    let blocked_syscalls: &[i64] = &[
-        SYS_connect,
-        SYS_bind,
-        SYS_sendto,
-        SYS_sendmsg,
-        SYS_listen,
-        SYS_accept,
-        SYS_accept4,
-    ];
+    const NR_OFFSET: u32 = 0;
+    const ARCH_OFFSET: u32 = 4;
+    let audit_arch = native_audit_arch().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "child network filter does not support this Linux architecture",
+        )
+    })?;
+    let blocked_syscalls = blocked_network_syscalls();
 
     let mut filter: Vec<sock_filter> = Vec::new();
     let total_checks = blocked_syscalls.len();
 
-    // 1. Load syscall number
+    // Reject a syscall table mismatch before comparing syscall numbers.
+    filter.push(bpf_stmt!(BPF_LD | BPF_W | BPF_ABS, ARCH_OFFSET));
+    filter.push(bpf_jump!(BPF_JMP | BPF_JEQ | BPF_K, audit_arch, 1, 0));
+    filter.push(bpf_stmt!(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS));
+
+    // 1. Load syscall number.
     filter.push(bpf_stmt!(BPF_LD | BPF_W | BPF_ABS, NR_OFFSET));
 
     // 2. Check each blocked syscall
@@ -108,4 +157,28 @@ pub unsafe fn install_child_network_filter() -> std::io::Result<()> {
 #[cfg(not(target_os = "linux"))]
 pub unsafe fn install_child_network_filter() -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::blocked_network_syscalls;
+
+    #[test]
+    fn filter_blocks_socket_sendmmsg_and_io_uring_bypasses() {
+        let blocked = blocked_network_syscalls();
+
+        for syscall in [
+            libc::SYS_socket,
+            libc::SYS_socketpair,
+            libc::SYS_sendmmsg,
+            libc::SYS_io_uring_setup,
+            libc::SYS_io_uring_enter,
+            libc::SYS_io_uring_register,
+        ] {
+            assert!(
+                blocked.contains(&syscall),
+                "network filter must block syscall {syscall}"
+            );
+        }
+    }
 }

@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! `x.ai/auth/*` and legacy `x.ai/{get,set}ApiKey` extension handlers.
 //!
 //! These methods let the client read/write the API key via the agent and
@@ -16,7 +17,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "x.ai/auth/getBearerToken" => handle_get_bearer_token(agent).await,
         "x.ai/getApiKey" => handle_get_api_key(),
-        "x.ai/setApiKey" => handle_set_api_key(args),
+        "x.ai/setApiKey" => handle_set_api_key(agent, args),
         "x.ai/auth/submit_code" => handle_submit_code(agent, args),
         "x.ai/auth/get_url" => handle_get_url(agent).await,
         "x.ai/auth/logout" => handle_logout(agent, args).await,
@@ -48,9 +49,19 @@ fn handle_get_api_key() -> ExtResult {
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))
 }
 
-fn handle_set_api_key(args: &acp::ExtRequest) -> ExtResult {
+fn handle_set_api_key(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let params: serde_json::Value = parse_params(args)?;
     let key = params.get("key").and_then(|v| v.as_str());
+    if crate::auth::api_key_persistence_disabled() {
+        crate::auth::clear_api_key(&crate::util::grok_home::grok_home())
+            .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+        let api_key = key.filter(|key| !key.is_empty()).map(str::to_owned);
+        crate::agent::auth_method::set_captured_desktop_api_key(api_key.clone());
+        agent.sampling_config.borrow_mut().api_key = api_key;
+        return ExtMethodResult::success(serde_json::json!({ "ok": true }))
+            .to_ext_response()
+            .map_err(|e| acp::Error::internal_error().data(e.to_string()));
+    }
     let grok_home = crate::util::grok_home::grok_home();
     if let Some(k) = key {
         if k.is_empty() {
