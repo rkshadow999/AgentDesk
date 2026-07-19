@@ -452,3 +452,5 @@ finally {
 }
 
 Write-Host "AgentDesk Cloud database maintenance tests passed."
+# GitHub Actions dot-sources pwsh steps, so expected native failures must not leak out.
+$global:LASTEXITCODE = 0
