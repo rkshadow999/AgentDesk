@@ -3,7 +3,7 @@ name: AgentDesk Windows CI
 on:
   push:
     branches:
-      - "**"
+      - "main"
     tags:
       - "v*"
   pull_request:

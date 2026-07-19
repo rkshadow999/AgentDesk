@@ -706,6 +706,19 @@ finally {
 
 $workflowSource = (Get-Content -LiteralPath (Join-Path $repositoryRoot ".github\workflows\agentdesk-windows.yml") -Raw) `
     -replace "\r\n?", "`n"
+$expectedWorkflowTrigger = @'
+on:
+  push:
+    branches:
+      - "main"
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+'@
+if (-not $workflowSource.Contains($expectedWorkflowTrigger)) {
+    throw "CI must run for main pushes, version tags, pull requests, and explicit workflow dispatch without duplicating branch pushes."
+}
 $workflowLines = $workflowSource -split "`n"
 for ($lineIndex = 0; $lineIndex -lt $workflowLines.Count; $lineIndex++) {
     $shellLine = $workflowLines[$lineIndex]

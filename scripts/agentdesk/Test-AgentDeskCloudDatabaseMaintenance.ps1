@@ -11,11 +11,13 @@ $ErrorActionPreference = "Stop"
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $backupScript = Join-Path $PSScriptRoot "Backup-AgentDeskCloudDatabase.ps1"
 $restoreScript = Join-Path $PSScriptRoot "Restore-AgentDeskCloudDatabase.ps1"
+$maintenanceModule = Join-Path $PSScriptRoot "AgentDesk.CloudDatabaseMaintenance.psm1"
 foreach ($requiredScript in @($backupScript, $restoreScript)) {
     if (-not (Test-Path -LiteralPath $requiredScript -PathType Leaf)) {
         throw "Cloud database maintenance script is missing: $requiredScript"
     }
 }
+Import-Module $maintenanceModule -Force
 
 function Invoke-ExpectedFailure {
     param(
@@ -142,6 +144,96 @@ function Write-Checksum {
         [System.Text.UTF8Encoding]::new($false))
 }
 
+function Test-TransientMaintenanceLeaseRelease {
+    param([Parameter(Mandatory)][string]$FixtureRoot)
+
+    $databasePath = Join-Path $FixtureRoot "transient-release.db"
+    $lockPath = "$databasePath.service.lock"
+    $readyPath = Join-Path $FixtureRoot "transient-release.ready"
+    $holderPath = Join-Path $FixtureRoot "transient-release-holder.ps1"
+    $holderSource = @'
+param(
+    [Parameter(Mandatory)][string]$LockPath,
+    [Parameter(Mandatory)][string]$ReadyPath
+)
+$share = [System.IO.FileShare](
+    [int][System.IO.FileShare]::ReadWrite -bor
+    [int][System.IO.FileShare]::Delete)
+$deleteHandle = $null
+$pendingHandle = $null
+try {
+    $deleteHandle = [System.IO.FileStream]::new(
+        $LockPath,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::ReadWrite,
+        $share,
+        4096,
+        [System.IO.FileOptions]::DeleteOnClose)
+    $pendingHandle = [System.IO.FileStream]::new(
+        $LockPath,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::ReadWrite,
+        $share,
+        4096,
+        [System.IO.FileOptions]::None)
+    $deleteHandle.Dispose()
+    $deleteHandle = $null
+    [System.IO.File]::WriteAllText($ReadyPath, "ready")
+    Start-Sleep -Milliseconds 350
+}
+finally {
+    if ($null -ne $deleteHandle) {
+        $deleteHandle.Dispose()
+    }
+    if ($null -ne $pendingHandle) {
+        $pendingHandle.Dispose()
+    }
+}
+'@
+    [System.IO.File]::WriteAllText(
+        $holderPath,
+        $holderSource,
+        [System.Text.UTF8Encoding]::new($false))
+    $holder = Start-Process `
+        -FilePath (Get-Command pwsh -ErrorAction Stop).Source `
+        -ArgumentList @(
+            "-NoLogo",
+            "-NoProfile",
+            "-File",
+            ('"' + $holderPath + '"'),
+            "-LockPath",
+            ('"' + $lockPath + '"'),
+            "-ReadyPath",
+            ('"' + $readyPath + '"')) `
+        -PassThru `
+        -WindowStyle Hidden
+    try {
+        $readyDeadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
+        while (-not (Test-Path -LiteralPath $readyPath -PathType Leaf)) {
+            $holder.Refresh()
+            if ($holder.HasExited) {
+                throw "The transient maintenance lease holder exited before acquiring the lock."
+            }
+            if ([DateTimeOffset]::UtcNow -ge $readyDeadline) {
+                throw "The transient maintenance lease holder did not acquire the lock before the timeout."
+            }
+            Start-Sleep -Milliseconds 25
+        }
+
+        $lease = Enter-AgentDeskCloudMaintenanceLease -DatabasePath $databasePath
+        $lease.Dispose()
+    }
+    finally {
+        if (-not $holder.HasExited) {
+            Wait-Process -Id $holder.Id -Timeout 10 -ErrorAction SilentlyContinue
+        }
+        if (-not $holder.HasExited) {
+            Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue
+        }
+        $holder.Dispose()
+    }
+}
+
 $project = Join-Path $repositoryRoot "cloud/src/AgentDesk.Cloud/AgentDesk.Cloud.csproj"
 & dotnet build $project --configuration Release --no-restore
 if ($LASTEXITCODE -ne 0) {
@@ -163,6 +255,10 @@ try {
     [System.IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
     [System.IO.Directory]::CreateDirectory((Split-Path -Parent $backupPath)) | Out-Null
     [System.IO.Directory]::CreateDirectory($rollbackDirectory) | Out-Null
+
+    if ($IsWindows) {
+        Test-TransientMaintenanceLeaseRelease -FixtureRoot $fixtureRoot
+    }
 
     $cloudProcess = Start-CloudFixture `
         -ServerPath $serverPath `

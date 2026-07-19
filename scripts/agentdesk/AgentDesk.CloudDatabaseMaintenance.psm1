@@ -61,22 +61,37 @@ function Resolve-AgentDeskCloudSafePath {
 function Enter-AgentDeskCloudMaintenanceLease {
     param([Parameter(Mandatory)][string]$DatabasePath)
 
-    try {
-        $fileOptions = [System.IO.FileOptions]::None
-        if ($IsWindows) {
-            $fileOptions = [System.IO.FileOptions]::DeleteOnClose
+    $fileOptions = [System.IO.FileOptions]::None
+    if ($IsWindows) {
+        $fileOptions = [System.IO.FileOptions]::DeleteOnClose
+    }
+    $attemptLimit = if ($IsWindows) { 20 } else { 1 }
+    for ($attempt = 1; $attempt -le $attemptLimit; $attempt++) {
+        try {
+            return [System.IO.FileStream]::new(
+                "$DatabasePath.service.lock",
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::ReadWrite,
+                [System.IO.FileShare]::None,
+                4096,
+                $fileOptions)
         }
-        return [System.IO.FileStream]::new(
-            "$DatabasePath.service.lock",
-            [System.IO.FileMode]::CreateNew,
-            [System.IO.FileAccess]::ReadWrite,
-            [System.IO.FileShare]::None,
-            4096,
-            $fileOptions)
+        catch [System.UnauthorizedAccessException] {
+            if (-not $IsWindows) {
+                throw
+            }
+            if ($attempt -lt $attemptLimit) {
+                # Delete-on-close lock names can remain briefly pending after a service exits.
+                Start-Sleep -Milliseconds 50
+                continue
+            }
+            break
+        }
+        catch [System.IO.IOException] {
+            break
+        }
     }
-    catch [System.IO.IOException] {
-        throw "The AgentDesk Cloud service is still running or another maintenance operation holds the database lease. Stop the service before backup or restore."
-    }
+    throw "The AgentDesk Cloud service is still running or another maintenance operation holds the database lease. Stop the service before backup or restore."
 }
 
 function Assert-AgentDeskCloudSqliteHeader {
