@@ -2112,6 +2112,10 @@ public sealed partial class AcpEngineClient : IEngineClient
         {
             return null;
         }
+        if (IsAbsoluteWorktreePath(repository))
+        {
+            return ValidateWorktreePath(repository, parameterName);
+        }
         if (string.IsNullOrWhiteSpace(repository) ||
             repository.Length > MaximumWorktreeRepositoryNameLength ||
             repository.Any(char.IsControl) ||

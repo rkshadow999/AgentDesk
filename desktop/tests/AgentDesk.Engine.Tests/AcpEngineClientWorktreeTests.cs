@@ -174,6 +174,25 @@ public sealed class AcpEngineClientWorktreeTests
     }
 
     [Fact]
+    public async Task ListWorktreesAsync_AllowsAnAbsoluteRepositoryPath()
+    {
+        await using var peer = new AcpPeer();
+        var operation = peer.Client.ListWorktreesAsync(
+            new WorktreeListRequest(Repository: "C:\\work\\repo"),
+            peer.Timeout.Token);
+        Assert.False(operation.IsCompleted);
+        using var message = await peer.ReadMessageAsync();
+
+        AssertRequest(message.RootElement, 1, "x.ai/git/worktree/list");
+        var parameters = message.RootElement.GetProperty("params");
+        Assert.Equal("C:\\work\\repo", parameters.GetProperty("repo").GetString());
+
+        await peer.RespondAsync(1, """{"result": []}""");
+
+        Assert.Empty(await operation);
+    }
+
+    [Fact]
     public async Task ShowWorktreeAsync_UsesIdOrPathAndMapsANullResult()
     {
         await using var peer = new AcpPeer();
