@@ -689,6 +689,29 @@ public sealed class AgentDeskHostControllerTests
     }
 
     [Fact]
+    public async Task WorktreeListStartupFailure_PublishesLocalErrorAndPersistsGlobalEngineError()
+    {
+        var fixture = new ControllerFixture();
+        fixture.Credentials.Save("xai", "xai-test-key");
+        fixture.Factory.EnqueueFailure(new InvalidOperationException("startup failed"));
+        await using var controller = fixture.CreateController();
+
+        await controller.HandleAsync(
+            new WorktreeListWebCommand(1, IncludeAll: false, Types: []));
+
+        var events = fixture.Events.Snapshot();
+        var worktreeError = Assert.Single(events.OfType<WorktreeErrorWebEvent>());
+        Assert.Equal(WorktreeOperation.List, worktreeError.Operation);
+        Assert.Contains(events, item => item is EngineStatusWebEvent { Status: "error" });
+
+        fixture.Events.Clear();
+        await controller.HandleAsync(new UiReadyWebCommand());
+        Assert.Contains(
+            fixture.Events.Snapshot(),
+            item => item is EngineStatusWebEvent { Status: "error" });
+    }
+
+    [Fact]
     public async Task WorktreeList_DropsALateResultAfterTheWorkspaceChanges()
     {
         var fixture = new ControllerFixture();

@@ -1827,11 +1827,20 @@ public sealed partial class AgentDeskHostController :
             var profile = _executionProfile ?? _uiPreferences
                 .ApplyHostCapabilities(_options.IsWslStrictAvailable)
                 .ExecutionProfile;
-            var promptContext = await EnsureEngineAsync(
-                    profile,
-                    runtimeOperationCancellations,
-                    cancellationToken)
-                .ConfigureAwait(false);
+            PromptContext promptContext;
+            try
+            {
+                promptContext = await EnsureEngineAsync(
+                        profile,
+                        runtimeOperationCancellations,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                Publish(SetStatusUnsafe("error", EngineErrorMessage, null));
+                throw;
+            }
             if (requestedSessionId is not null &&
                 !string.Equals(
                     promptContext.SessionId.Value,
