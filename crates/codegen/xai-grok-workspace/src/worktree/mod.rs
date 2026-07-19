@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Git worktree operations: create, list, remove, apply.
 //!
 //! Moved from `xai-grok-shell/src/session/worktree.rs` into the workspace
@@ -715,8 +716,23 @@ fn worktree_record_for_cwd(cwd: &str) -> Option<(WorktreeDb, WorktreeRecord)> {
             return None;
         }
     };
+    let records = match db.list(&ListFilter {
+        include_dead: true,
+        ..Default::default()
+    }) {
+        Ok(records) => records,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to list worktree DB for cwd lookup");
+            return None;
+        }
+    };
     while path.starts_with(&worktrees_dir) && path != worktrees_dir {
-        if let Ok(Some(record)) = db.get(&path.to_string_lossy()) {
+        let path_key = worktree_path_key(path);
+        if let Some(record) = records
+            .iter()
+            .find(|record| worktree_path_key(&record.path) == path_key)
+            .cloned()
+        {
             return Some((db, record));
         }
         path = path.parent()?;
@@ -1133,6 +1149,7 @@ pub async fn remove_worktree(
         (None, None) => anyhow::bail!("either worktreePath or idOrPath must be set"),
     };
     let worktree_path = Path::new(&resolved);
+    let removal_kind = ensure_removable_worktree(worktree_path)?;
 
     tracing::info!(
         target: WORKTREE_LOG,
@@ -1142,8 +1159,7 @@ pub async fn remove_worktree(
         "REMOVE_START: removing worktree"
     );
 
-    // jj workspace: detect by .jj/repo and route to jj-specific cleanup.
-    if worktree_path.join(".jj").join("repo").exists() {
+    if matches!(removal_kind, RemovableWorktreeKind::JjSecondary) {
         if req.dry_run {
             return Ok(RemoveWorktreeResponse {
                 removed: false,
@@ -1176,8 +1192,52 @@ pub async fn remove_worktree(
         );
     }
 
+    if let RemovableWorktreeKind::GitLinked {
+        main_repo,
+        record_id,
+    } = &removal_kind
+    {
+        let arguments = if req.force {
+            vec![
+                "worktree",
+                "remove",
+                "--force",
+                "--force",
+                resolved.as_str(),
+            ]
+        } else {
+            vec!["worktree", "remove", resolved.as_str()]
+        };
+        git_cli(main_repo, &arguments).await?;
+        if let Ok(db) = open_db() {
+            if let Some(record_id) = record_id {
+                let _ = db.unregister(record_id);
+            } else {
+                let _ = db.unregister_by_path(worktree_path);
+            }
+        }
+        let elapsed_ms = remove_start.elapsed().as_millis() as u64;
+        tracing::info!(
+            target: WORKTREE_LOG,
+            path = %resolved,
+            elapsed_ms,
+            force = req.force,
+            "REMOVE_OK_GIT: linked worktree removed via git CLI"
+        );
+        return Ok(RemoveWorktreeResponse {
+            removed: true,
+            resolved_path: Some(resolved),
+        });
+    }
+
+    if matches!(removal_kind, RemovableWorktreeKind::ManagedFast { .. }) && !req.force {
+        let status = git_cli(worktree_path, &["status", "--porcelain=v1"]).await?;
+        if !status.trim().is_empty() {
+            anyhow::bail!("refusing to remove a dirty standalone worktree without force");
+        }
+    }
+
     let wt_path = worktree_path.to_path_buf();
-    let force = req.force;
 
     // The btrfs delegate is used only as a fallback when a direct btrfs op fails
     // (rootless hosts lack CAP_SYS_ADMIN for direct subvolume ops).
@@ -1188,6 +1248,11 @@ pub async fn remove_worktree(
     .await
     {
         Ok(Ok(report)) => {
+            if let RemovableWorktreeKind::ManagedFast { record_id } = &removal_kind
+                && let Ok(db) = open_db()
+            {
+                let _ = db.unregister(record_id);
+            }
             let elapsed_ms = remove_start.elapsed().as_millis() as u64;
             if report.used_btrfs_delete {
                 tracing::info!(
@@ -1209,37 +1274,15 @@ pub async fn remove_worktree(
             })
         }
         Ok(Err(e)) => {
-            if force {
-                tracing::info!(
-                    target: WORKTREE_LOG,
-                    path = %resolved,
-                    error = %e,
-                    "REMOVE_FAST_FAILED: trying git worktree remove --force"
-                );
-                let git_root = find_main_repo_root_from_path(worktree_path)?;
-                git_cli(&git_root, &["worktree", "remove", "--force", &resolved]).await?;
-                let elapsed_ms = remove_start.elapsed().as_millis() as u64;
-                tracing::info!(
-                    target: WORKTREE_LOG,
-                    path = %resolved,
-                    elapsed_ms,
-                    "REMOVE_OK_FORCE: worktree removed via git CLI --force"
-                );
-                Ok(RemoveWorktreeResponse {
-                    removed: true,
-                    resolved_path: Some(resolved),
-                })
-            } else {
-                let elapsed_ms = remove_start.elapsed().as_millis() as u64;
-                tracing::warn!(
-                    target: WORKTREE_LOG,
-                    path = %resolved,
-                    elapsed_ms,
-                    error = %e,
-                    "REMOVE_ERROR: fast remove failed (force=false)"
-                );
-                Err(e)
-            }
+            let elapsed_ms = remove_start.elapsed().as_millis() as u64;
+            tracing::warn!(
+                target: WORKTREE_LOG,
+                path = %resolved,
+                elapsed_ms,
+                error = %e,
+                "REMOVE_ERROR: managed standalone removal failed"
+            );
+            Err(e)
         }
         Err(e) => {
             let elapsed_ms = remove_start.elapsed().as_millis() as u64;
@@ -2253,15 +2296,16 @@ pub async fn create_jj_workspace(
 /// Remove a jj workspace: forget + delete directory.
 pub async fn remove_jj_workspace(workspace_path: &str) -> Result<()> {
     let path = Path::new(workspace_path);
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .replace(['/', '\\', '.'], "-");
-
-    if let Ok(root) = find_git_root_from_path(path) {
-        let _ = jj_cli_mut(&root, &["workspace", "forget", &name]).await;
+    if !matches!(
+        ensure_removable_worktree(path)?,
+        RemovableWorktreeKind::JjSecondary
+    ) {
+        anyhow::bail!("refusing to remove a path that is not a secondary jj workspace");
     }
+
+    jj_cli_mut(path, &["workspace", "forget"])
+        .await
+        .map_err(|error| anyhow::anyhow!("jj workspace forget failed: {error}"))?;
 
     if path.exists() {
         tracing::info!(path = %workspace_path, "removing jj workspace directory");
@@ -2368,34 +2412,608 @@ pub fn open_db() -> Result<WorktreeDb> {
     WorktreeDb::open_default()
 }
 
+#[derive(Default)]
+struct GitWorktreeEntry {
+    path: Option<std::path::PathBuf>,
+    head_commit: Option<String>,
+    git_ref: Option<String>,
+    bare: bool,
+    prunable: bool,
+}
+
+fn canonical_worktree_path(path: &Path) -> std::path::PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn worktree_path_key(path: &Path) -> String {
+    let canonical = canonical_worktree_path(path);
+    #[cfg(unix)]
+    {
+        use std::fmt::Write as _;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut key = String::new();
+        for byte in canonical.as_os_str().as_bytes() {
+            match byte {
+                b'/' => key.push('/'),
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-' | b'_' => {
+                    key.push(char::from(*byte));
+                }
+                _ => {
+                    let _ = write!(key, "%{byte:02X}");
+                }
+            }
+        }
+        return key;
+    }
+    #[cfg(windows)]
+    {
+        let mut key = dunce::simplified(&canonical)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if key
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("//?/unc/"))
+        {
+            key = format!("//{}", &key[8..]);
+        } else if key.starts_with("//?/") {
+            key.drain(..4);
+        }
+        return key.to_lowercase();
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        dunce::simplified(&canonical).to_string_lossy().into_owned()
+    }
+}
+
+fn git_worktree_path_from_bytes(value: &[u8]) -> Result<std::path::PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        return Ok(OsString::from_vec(value.to_vec()).into());
+    }
+    #[cfg(windows)]
+    {
+        let value = std::str::from_utf8(value).map_err(|error| {
+            anyhow::anyhow!("git returned an invalid UTF-8 worktree path: {error}")
+        })?;
+        return Ok(std::path::PathBuf::from(value));
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let value = std::str::from_utf8(value).map_err(|error| {
+            anyhow::anyhow!("git returned an invalid UTF-8 worktree path: {error}")
+        })?;
+        Ok(std::path::PathBuf::from(value))
+    }
+}
+
+fn parse_git_worktree_porcelain(bytes: &[u8]) -> Result<Vec<GitWorktreeEntry>> {
+    let mut entries = Vec::new();
+    let mut current = GitWorktreeEntry::default();
+
+    for field in bytes.split(|byte| *byte == 0) {
+        if field.is_empty() {
+            if current.path.is_some() {
+                entries.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+
+        let separator = field.iter().position(|byte| *byte == b' ');
+        let (name, value) = match separator {
+            Some(index) => (&field[..index], Some(&field[index + 1..])),
+            None => (field, None),
+        };
+        match name {
+            b"worktree" => {
+                if current.path.is_some() {
+                    entries.push(std::mem::take(&mut current));
+                }
+                if let Some(value) = value {
+                    current.path = Some(git_worktree_path_from_bytes(value)?);
+                }
+            }
+            b"HEAD" => {
+                current.head_commit =
+                    value.map(|value| String::from_utf8_lossy(value).into_owned());
+            }
+            b"branch" => {
+                current.git_ref = value.map(|value| {
+                    let value = String::from_utf8_lossy(value);
+                    value
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(value.as_ref())
+                        .to_owned()
+                });
+            }
+            b"bare" => current.bare = true,
+            b"prunable" => current.prunable = true,
+            _ => {}
+        }
+    }
+    if current.path.is_some() {
+        entries.push(current);
+    }
+    Ok(entries)
+}
+
+fn load_git_worktree_entries(repo_path: &Path) -> Result<Vec<GitWorktreeEntry>> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["worktree", "list", "--porcelain", "-z"])
+        .output()
+        .map_err(|error| anyhow::anyhow!("failed to run git worktree list: {error}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git worktree list failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    parse_git_worktree_porcelain(&output.stdout)
+}
+
+fn find_main_worktree_root_from_path(path: &Path) -> Result<std::path::PathBuf> {
+    load_git_worktree_entries(path)?
+        .into_iter()
+        .find(|entry| !entry.bare)
+        .and_then(|entry| entry.path)
+        .map(|path| canonical_worktree_path(&path))
+        .ok_or_else(|| anyhow::anyhow!("git repository has no non-bare main worktree"))
+}
+
+fn discovered_worktree_id(path: &Path, is_main: bool) -> String {
+    let derived = xai_fast_worktree::id_from_path(path);
+    let hash = derived.rsplit('-').next().unwrap_or("worktree");
+    format!("git-{}-{hash}", if is_main { "main" } else { "linked" })
+}
+
+fn discover_git_worktrees(main_repo: &Path) -> Result<Vec<WorktreeRecord>> {
+    let main_repo = canonical_worktree_path(main_repo);
+    let main_key = worktree_path_key(&main_repo);
+    let repository = Repository::discover(&main_repo)?;
+    let repo_name = xai_fast_worktree::repo_name_from_path(&main_repo);
+    let mut records = Vec::new();
+    for entry in load_git_worktree_entries(&main_repo)? {
+        if entry.bare {
+            continue;
+        }
+        let Some(path) = entry.path else {
+            continue;
+        };
+        let path = canonical_worktree_path(&path);
+        let is_main = worktree_path_key(&path) == main_key;
+        let status = if entry.prunable || !path.exists() {
+            xai_fast_worktree::WorktreeStatus::Dead
+        } else {
+            xai_fast_worktree::WorktreeStatus::Alive
+        };
+        let created_at = entry
+            .head_commit
+            .as_deref()
+            .and_then(|commit| Oid::from_str(commit).ok())
+            .and_then(|commit| repository.find_commit(commit).ok())
+            .map(|commit| commit.time().seconds())
+            .unwrap_or_default();
+        records.push(WorktreeRecord {
+            id: discovered_worktree_id(&path, is_main),
+            path,
+            source_repo: main_repo.clone(),
+            repo_name: repo_name.clone(),
+            kind: WorktreeKind::Manual,
+            creation_mode: if is_main { "standalone" } else { "linked" }.to_string(),
+            git_ref: entry.git_ref,
+            head_commit: entry.head_commit,
+            session_id: None,
+            creator_pid: None,
+            created_at,
+            last_accessed_at: None,
+            status,
+            metadata: None,
+        });
+    }
+    Ok(records)
+}
+
+enum WorktreeListScope {
+    Repository(std::path::PathBuf),
+    RepoName(String),
+    All,
+}
+
+fn resolve_worktree_list_scope(repo: Option<&str>) -> Result<WorktreeListScope> {
+    match repo {
+        Some(value) if std::path::PathBuf::from(value).is_absolute() => {
+            let candidate = std::path::PathBuf::from(value);
+            let db = open_db()?;
+            let records = db.list(&ListFilter {
+                include_dead: true,
+                ..Default::default()
+            })?;
+            let managed_by_path: HashMap<_, _> = records
+                .into_iter()
+                .map(|record| (worktree_path_key(&record.path), record))
+                .collect();
+            let source = resolve_ultimate_managed_source(&candidate, &managed_by_path)
+                .unwrap_or_else(|| candidate.clone());
+            let root = find_main_worktree_root_from_path(&source)
+                .or_else(|_| find_main_worktree_root_from_path(&candidate))?;
+            Ok(WorktreeListScope::Repository(root))
+        }
+        Some(value) => Ok(WorktreeListScope::RepoName(value.to_owned())),
+        None => Ok(WorktreeListScope::All),
+    }
+}
+
+fn matches_worktree_types(record: &WorktreeRecord, types: &[String]) -> bool {
+    match types {
+        [] => true,
+        [kind] => record.kind == WorktreeKind::from_str_lossy(kind),
+        kinds => kinds.iter().any(|kind| kind == record.kind.as_str()),
+    }
+}
+
+fn path_key_is_within(candidate: &str, parent: &str) -> bool {
+    candidate == parent
+        || candidate
+            .strip_prefix(parent)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn managed_record_containing_path<'a>(
+    path_key: &str,
+    managed_by_path: &'a HashMap<String, WorktreeRecord>,
+) -> Option<&'a WorktreeRecord> {
+    managed_by_path
+        .iter()
+        .filter(|(managed_key, _)| path_key_is_within(path_key, managed_key))
+        .max_by_key(|(managed_key, _)| managed_key.len())
+        .map(|(_, record)| record)
+}
+
+fn resolve_ultimate_managed_source(
+    path: &Path,
+    managed_by_path: &HashMap<String, WorktreeRecord>,
+) -> Option<std::path::PathBuf> {
+    let mut current = path.to_path_buf();
+    let mut visited = HashSet::new();
+    loop {
+        let current_key = worktree_path_key(&current);
+        if !visited.insert(current_key.clone()) {
+            return None;
+        }
+        let Some(record) = managed_record_containing_path(&current_key, managed_by_path) else {
+            return Some(current);
+        };
+        current = record.source_repo.clone();
+    }
+}
+
+fn record_belongs_to_repository(
+    record: &WorktreeRecord,
+    main_key: &str,
+    discovered_paths: &HashSet<String>,
+    managed_by_path: &HashMap<String, WorktreeRecord>,
+) -> bool {
+    if discovered_paths.contains(&worktree_path_key(&record.path)) {
+        return true;
+    }
+
+    let Some(source) = resolve_ultimate_managed_source(&record.source_repo, managed_by_path) else {
+        return false;
+    };
+    let source_key = worktree_path_key(&source);
+    source_key == main_key
+        || find_main_worktree_root_from_path(&source)
+            .map(|root| worktree_path_key(&root) == main_key)
+            .unwrap_or(false)
+}
+
+fn managed_worktree_for_path(path: &Path) -> Result<Option<WorktreeRecord>> {
+    let key = worktree_path_key(path);
+    let db = open_db()?;
+    Ok(db
+        .list(&ListFilter {
+            include_dead: true,
+            ..Default::default()
+        })?
+        .into_iter()
+        .find(|record| worktree_path_key(&record.path) == key))
+}
+
+fn is_agentdesk_managed_worktree_path(path: &Path) -> bool {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let Ok(current_dir) = std::env::current_dir() else {
+            return false;
+        };
+        current_dir.join(path)
+    };
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    let worktrees_root = grok_home().join("worktrees");
+    #[cfg(windows)]
+    {
+        let path_key = dunce::simplified(&path)
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_lowercase();
+        let root_key = dunce::simplified(&worktrees_root)
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_lowercase();
+        let Some(relative) = path_key.strip_prefix(&(root_key + "/")) else {
+            return false;
+        };
+        let components: Vec<_> = relative.split('/').collect();
+        return components.len() >= 2
+            && components
+                .iter()
+                .all(|component| !component.is_empty() && *component != "." && *component != "..");
+    }
+    #[cfg(not(windows))]
+    {
+        let Ok(relative) = path.strip_prefix(&worktrees_root) else {
+            return false;
+        };
+        let components: Vec<_> = relative.components().collect();
+        components.len() >= 2
+            && components
+                .iter()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+    }
+}
+
+fn validate_jj_secondary_workspace(path: &Path) -> Result<bool> {
+    let marker = path.join(".jj").join("repo");
+    let marker_metadata = match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error.into());
+        }
+    };
+
+    if !is_agentdesk_managed_worktree_path(path) {
+        anyhow::bail!(
+            "refusing to remove a jj path outside the AgentDesk-managed worktree directory"
+        );
+    }
+    if marker_metadata.is_dir() {
+        anyhow::bail!("refusing to remove a primary jj repository");
+    }
+    if !marker_metadata.is_file() {
+        anyhow::bail!("refusing to remove an invalid jj workspace pointer");
+    }
+
+    let output = std::process::Command::new("jj")
+        .current_dir(path)
+        .args(["workspace", "root"])
+        .output()
+        .map_err(|error| anyhow::anyhow!("failed to validate jj workspace: {error}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "failed to validate jj workspace: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let reported_root = String::from_utf8(output.stdout)
+        .map_err(|_| anyhow::anyhow!("jj workspace root returned non-UTF-8 output"))?;
+    let reported_root = Path::new(reported_root.trim());
+    if worktree_path_key(reported_root) != worktree_path_key(path) {
+        anyhow::bail!("jj workspace root does not match the requested removal path");
+    }
+
+    Ok(true)
+}
+
+#[derive(Debug)]
+enum RemovableWorktreeKind {
+    GitLinked {
+        main_repo: std::path::PathBuf,
+        record_id: Option<String>,
+    },
+    ManagedFast {
+        record_id: String,
+    },
+    JjSecondary,
+}
+
+fn managed_worktree_source_marker(path: &Path) -> Result<Option<std::path::PathBuf>> {
+    const MAX_MARKER_BYTES: u64 = 32 * 1024;
+
+    let marker = path.join(".git").join("grok-worktree-source");
+    let metadata = match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() || metadata.len() > MAX_MARKER_BYTES {
+        anyhow::bail!("invalid managed worktree source marker");
+    }
+    let contents = std::fs::read_to_string(&marker)?;
+    let source = contents.trim();
+    if source.is_empty() || source.contains('\0') {
+        anyhow::bail!("invalid managed worktree source marker");
+    }
+    let source = std::path::PathBuf::from(source);
+    if !source.is_absolute() {
+        anyhow::bail!("managed worktree source marker must be absolute");
+    }
+    Ok(Some(source))
+}
+
+fn is_trusted_managed_fast_worktree(path: &Path, record: &WorktreeRecord) -> Result<bool> {
+    if record.status != xai_fast_worktree::WorktreeStatus::Alive
+        || !matches!(record.creation_mode.as_str(), "linked" | "standalone")
+        || record.kind == WorktreeKind::Manual
+        || !is_agentdesk_managed_worktree_path(path)
+    {
+        return Ok(false);
+    }
+    let Some(marker_source) = managed_worktree_source_marker(path)? else {
+        return Ok(false);
+    };
+
+    let db = open_db()?;
+    let managed_by_path: HashMap<_, _> = db
+        .list(&ListFilter {
+            include_dead: true,
+            ..Default::default()
+        })?
+        .into_iter()
+        .map(|record| (worktree_path_key(&record.path), record))
+        .collect();
+    let expected_source = resolve_ultimate_managed_source(&record.source_repo, &managed_by_path)
+        .unwrap_or_else(|| record.source_repo.clone());
+    let expected_root = find_main_worktree_root_from_path(&expected_source)
+        .unwrap_or_else(|_| canonical_worktree_path(&expected_source));
+    let marker_root = find_main_worktree_root_from_path(&marker_source)
+        .unwrap_or_else(|_| canonical_worktree_path(&marker_source));
+    Ok(worktree_path_key(&expected_root) == worktree_path_key(&marker_root))
+}
+
+fn ensure_removable_worktree(path: &Path) -> Result<RemovableWorktreeKind> {
+    let visible_path = path.to_path_buf();
+    if validate_jj_secondary_workspace(&visible_path)? {
+        return Ok(RemovableWorktreeKind::JjSecondary);
+    }
+
+    let managed = managed_worktree_for_path(&visible_path)?;
+    match Repository::discover(&visible_path) {
+        Ok(repository) => {
+            let workdir = repository
+                .workdir()
+                .map(canonical_worktree_path)
+                .ok_or_else(|| anyhow::anyhow!("refusing to remove a bare repository"))?;
+            if worktree_path_key(&workdir) != worktree_path_key(&visible_path) {
+                anyhow::bail!("refusing to remove a path that is not a worktree root");
+            }
+            if repository.is_worktree() {
+                return Ok(RemovableWorktreeKind::GitLinked {
+                    main_repo: find_main_worktree_root_from_path(&visible_path)?,
+                    record_id: managed.as_ref().map(|record| record.id.clone()),
+                });
+            }
+            if let Some(record) = managed.as_ref()
+                && is_trusted_managed_fast_worktree(&visible_path, record)?
+            {
+                return Ok(RemovableWorktreeKind::ManagedFast {
+                    record_id: record.id.clone(),
+                });
+            }
+            anyhow::bail!("refusing to remove the main repository worktree");
+        }
+        Err(error) => {
+            if let Some(record) = managed.as_ref()
+                && is_trusted_managed_fast_worktree(&visible_path, record)?
+            {
+                return Ok(RemovableWorktreeKind::ManagedFast {
+                    record_id: record.id.clone(),
+                });
+            }
+            Err(error.into())
+        }
+    }
+}
+
 pub fn list_worktrees(
     repo: Option<&str>,
     types: &[String],
     include_all: bool,
 ) -> Result<Vec<WorktreeRecord>> {
     let db = open_db()?;
+    let scope = resolve_worktree_list_scope(repo)?;
 
-    let kind = if types.len() == 1 {
-        Some(WorktreeKind::from_str_lossy(&types[0]))
-    } else {
-        None
+    let main_repo = match scope {
+        WorktreeListScope::Repository(path) => path,
+        WorktreeListScope::RepoName(repo_name) => {
+            let kind = (types.len() == 1).then(|| WorktreeKind::from_str_lossy(&types[0]));
+            let mut records = db.list(&ListFilter {
+                repo_name: Some(repo_name),
+                kind,
+                include_dead: include_all,
+                ..Default::default()
+            })?;
+            if types.len() > 1 {
+                records.retain(|record| matches_worktree_types(record, types));
+            }
+            return Ok(records);
+        }
+        WorktreeListScope::All => {
+            let kind = (types.len() == 1).then(|| WorktreeKind::from_str_lossy(&types[0]));
+            let mut records = db.list(&ListFilter {
+                kind,
+                include_dead: include_all,
+                ..Default::default()
+            })?;
+            if types.len() > 1 {
+                records.retain(|record| matches_worktree_types(record, types));
+            }
+            return Ok(records);
+        }
     };
+    let main_key = worktree_path_key(&main_repo);
+    let mut records_by_path = HashMap::new();
 
-    let filter = ListFilter {
-        repo_name: repo.map(str::to_owned),
-        source_repo: None,
-        kind,
-        status: None,
-        include_dead: include_all,
-    };
+    for record in discover_git_worktrees(&main_repo)? {
+        records_by_path.insert(worktree_path_key(&record.path), record);
+    }
+    let discovered_paths: HashSet<_> = records_by_path.keys().cloned().collect();
 
-    let mut records = db.list(&filter)?;
-
-    // Client-side filter when multiple --type values are given.
-    if types.len() > 1 {
-        records.retain(|r| types.iter().any(|t| t == r.kind.as_str()));
+    let mut managed_records = db.list(&ListFilter {
+        include_dead: true,
+        ..Default::default()
+    })?;
+    let managed_by_path: HashMap<_, _> = managed_records
+        .iter()
+        .cloned()
+        .map(|record| (worktree_path_key(&record.path), record))
+        .collect();
+    managed_records.retain(|record| {
+        record_belongs_to_repository(record, &main_key, &discovered_paths, &managed_by_path)
+    });
+    for mut managed in managed_records {
+        let path_key = worktree_path_key(&managed.path);
+        if main_key == path_key {
+            continue;
+        }
+        if let Some(discovered) = records_by_path.get(&path_key) {
+            managed.path = discovered.path.clone();
+            managed.source_repo = discovered.source_repo.clone();
+            managed.repo_name = discovered.repo_name.clone();
+            managed.git_ref = discovered.git_ref.clone().or(managed.git_ref);
+            managed.head_commit = discovered.head_commit.clone().or(managed.head_commit);
+            managed.status = discovered.status;
+        }
+        records_by_path.insert(path_key, managed);
     }
 
+    let mut records: Vec<_> = records_by_path.into_values().collect();
+    records.retain(|record| {
+        (include_all || record.status == xai_fast_worktree::WorktreeStatus::Alive)
+            && matches_worktree_types(record, types)
+    });
+    records.sort_by(|left, right| {
+        let left_key = worktree_path_key(&left.path);
+        let right_key = worktree_path_key(&right.path);
+        let left_is_main = main_key == left_key;
+        let right_is_main = main_key == right_key;
+        (!left_is_main)
+            .cmp(&(!right_is_main))
+            .then_with(|| left_key.cmp(&right_key))
+            .then_with(|| left.id.cmp(&right.id))
+    });
     Ok(records)
 }
 
@@ -2583,6 +3201,930 @@ mod tests {
         let wt = temp.path().join("wt");
         WorktreeBuilder::new(&repo, &wt).create().unwrap();
         (repo, wt)
+    }
+
+    #[test]
+    fn list_worktrees_includes_main_worktree_for_plain_git_repo() {
+        xai_test_utils::require_git!();
+        use xai_test_utils::git::{git_commit_all, init_git_repo};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let repo = root.join("plain-repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join("tracked.txt"), "initial").unwrap();
+        git_commit_all(&repo, "initial");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+
+        let records = list_worktrees(Some(repo.to_str().unwrap()), &[], false).unwrap();
+
+        let main = records
+            .iter()
+            .find(|record| record.path == repo)
+            .expect("plain repository main worktree should be listed");
+        assert_eq!(main.source_repo, repo);
+        assert_eq!(main.repo_name, "plain-repo");
+        assert_eq!(main.kind, WorktreeKind::Manual);
+        assert_eq!(main.creation_mode, "standalone");
+        assert_eq!(main.status, xai_fast_worktree::WorktreeStatus::Alive);
+        assert!(main.head_commit.is_some());
+    }
+
+    #[test]
+    fn list_worktrees_marks_unmanaged_linked_worktrees() {
+        xai_test_utils::require_git!();
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let (repo, worktree) = repo_with_worktree(&temp);
+        let repo = dunce::canonicalize(repo).unwrap();
+        let worktree = dunce::canonicalize(worktree).unwrap();
+        let second_worktree = root.join("wt-second");
+        WorktreeBuilder::new(&repo, &second_worktree)
+            .create()
+            .unwrap();
+        let second_worktree = dunce::canonicalize(second_worktree).unwrap();
+
+        let records = list_worktrees(Some(repo.to_str().unwrap()), &[], false).unwrap();
+
+        assert_eq!(records.len(), 3, "main plus both linked worktrees");
+        for path in [worktree, second_worktree] {
+            let linked = records
+                .iter()
+                .find(|record| record.path == path)
+                .expect("linked git worktree should be listed");
+            assert_eq!(linked.source_repo, repo);
+            assert_eq!(linked.kind, WorktreeKind::Manual);
+            assert_eq!(linked.creation_mode, "linked");
+            assert_eq!(linked.status, xai_fast_worktree::WorktreeStatus::Alive);
+        }
+    }
+
+    #[test]
+    fn list_worktrees_prefers_db_metadata_and_deduplicates_paths_stably() {
+        xai_test_utils::require_git!();
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let (repo, worktree) = repo_with_worktree(&temp);
+        let repo = dunce::canonicalize(repo).unwrap();
+        let worktree = dunce::canonicalize(worktree).unwrap();
+        let db = WorktreeDb::open(&home).unwrap();
+        db.register(&WorktreeRecord {
+            id: "managed-linked".to_string(),
+            path: worktree.clone(),
+            source_repo: repo.clone(),
+            repo_name: "repo".to_string(),
+            kind: WorktreeKind::Session,
+            creation_mode: "linked".to_string(),
+            git_ref: Some("managed-branch".to_string()),
+            head_commit: Some(git_out(&worktree, &["rev-parse", "HEAD"])),
+            session_id: Some("session-managed".to_string()),
+            creator_pid: None,
+            created_at: 100,
+            last_accessed_at: None,
+            status: xai_fast_worktree::WorktreeStatus::Alive,
+            metadata: Some(build_label_metadata("managed", true)),
+        })
+        .unwrap();
+
+        let first = list_worktrees(Some(repo.to_str().unwrap()), &[], false).unwrap();
+        let second = list_worktrees(Some(repo.to_str().unwrap()), &[], false).unwrap();
+
+        assert_eq!(first.len(), 2, "main plus one deduplicated linked worktree");
+        assert_eq!(
+            first
+                .iter()
+                .map(|record| &record.path)
+                .collect::<HashSet<_>>()
+                .len(),
+            first.len(),
+            "every path must be unique"
+        );
+        assert_eq!(
+            first
+                .iter()
+                .map(|record| (&record.id, &record.path))
+                .collect::<Vec<_>>(),
+            second
+                .iter()
+                .map(|record| (&record.id, &record.path))
+                .collect::<Vec<_>>(),
+            "merged ordering must be stable"
+        );
+        assert_eq!(first[0].path, repo, "main worktree should sort first");
+        let managed = first
+            .iter()
+            .find(|record| record.path == worktree)
+            .expect("managed worktree should be present");
+        assert_eq!(managed.id, "managed-linked");
+        assert_eq!(managed.kind, WorktreeKind::Session);
+        assert_eq!(managed.session_id.as_deref(), Some("session-managed"));
+    }
+
+    #[test]
+    fn list_worktrees_preserves_repo_name_types_and_include_all_filters() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let db = WorktreeDb::open(&home).unwrap();
+        let alive = WorktreeRecord {
+            id: "alive-session".to_string(),
+            path: root.join("alive-session"),
+            source_repo: root.join("source-repo"),
+            repo_name: "legacy-repo".to_string(),
+            kind: WorktreeKind::Session,
+            creation_mode: "standalone".to_string(),
+            git_ref: None,
+            head_commit: None,
+            session_id: Some("session-alive".to_string()),
+            creator_pid: None,
+            created_at: 200,
+            last_accessed_at: None,
+            status: xai_fast_worktree::WorktreeStatus::Alive,
+            metadata: None,
+        };
+        let mut dead = alive.clone();
+        dead.id = "dead-session".to_string();
+        dead.path = root.join("dead-session");
+        dead.session_id = Some("session-dead".to_string());
+        dead.status = xai_fast_worktree::WorktreeStatus::Dead;
+        let mut manual = alive.clone();
+        manual.id = "alive-manual".to_string();
+        manual.path = root.join("alive-manual");
+        manual.kind = WorktreeKind::Manual;
+        manual.session_id = None;
+        db.register(&alive).unwrap();
+        db.register(&dead).unwrap();
+        db.register(&manual).unwrap();
+
+        let alive_sessions =
+            list_worktrees(Some("legacy-repo"), &["session".to_string()], false).unwrap();
+        let all_sessions =
+            list_worktrees(Some("legacy-repo"), &["session".to_string()], true).unwrap();
+        let unknown_type =
+            list_worktrees(Some("legacy-repo"), &["future-kind".to_string()], false).unwrap();
+
+        assert_eq!(
+            alive_sessions
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            ["alive-session"]
+        );
+        assert_eq!(
+            all_sessions
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["alive-session", "dead-session"])
+        );
+        assert_eq!(
+            unknown_type
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            ["alive-manual"]
+        );
+    }
+
+    #[test]
+    fn list_worktrees_without_repo_keeps_legacy_all_scope() {
+        assert!(matches!(
+            resolve_worktree_list_scope(None).unwrap(),
+            WorktreeListScope::All
+        ));
+    }
+
+    #[test]
+    fn relative_existing_directory_remains_a_legacy_repo_name() {
+        let current_dir = std::env::current_dir().unwrap();
+        let existing = tempfile::Builder::new()
+            .prefix("relative-repo-name-")
+            .tempdir_in(&current_dir)
+            .unwrap();
+        let repo_name = existing
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        match resolve_worktree_list_scope(Some(&repo_name)).unwrap() {
+            WorktreeListScope::RepoName(actual) => assert_eq!(actual, repo_name),
+            _ => panic!("a relative value must retain repo-name semantics"),
+        }
+    }
+
+    #[test]
+    fn list_worktrees_keeps_metadata_when_source_repo_is_nested_directory() {
+        xai_test_utils::require_git!();
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let (repo, worktree) = repo_with_worktree(&temp);
+        let repo = dunce::canonicalize(repo).unwrap();
+        let worktree = dunce::canonicalize(worktree).unwrap();
+        let nested_source = repo.join("nested");
+        std::fs::create_dir(&nested_source).unwrap();
+        let db = WorktreeDb::open(&home).unwrap();
+        db.register(&WorktreeRecord {
+            id: "nested-source-metadata".to_string(),
+            path: worktree.clone(),
+            source_repo: nested_source,
+            repo_name: "repo".to_string(),
+            kind: WorktreeKind::Session,
+            creation_mode: "linked".to_string(),
+            git_ref: None,
+            head_commit: None,
+            session_id: Some("nested-source-session".to_string()),
+            creator_pid: None,
+            created_at: 100,
+            last_accessed_at: None,
+            status: xai_fast_worktree::WorktreeStatus::Alive,
+            metadata: Some(build_label_metadata("nested-source", true)),
+        })
+        .unwrap();
+
+        let records = list_worktrees(Some(repo.to_str().unwrap()), &[], false).unwrap();
+        let managed = records
+            .iter()
+            .find(|record| record.path == worktree)
+            .expect("linked worktree should remain listed");
+
+        assert_eq!(managed.id, "nested-source-metadata");
+        assert_eq!(managed.session_id.as_deref(), Some("nested-source-session"));
+    }
+
+    #[test]
+    fn list_worktrees_keeps_metadata_when_source_repo_is_linked_worktree() {
+        xai_test_utils::require_git!();
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let (repo, source_worktree) = repo_with_worktree(&temp);
+        let repo = dunce::canonicalize(repo).unwrap();
+        let source_worktree = dunce::canonicalize(source_worktree).unwrap();
+        let managed_worktree = root.join("managed-worktree");
+        WorktreeBuilder::new(&repo, &managed_worktree)
+            .create()
+            .unwrap();
+        let managed_worktree = dunce::canonicalize(managed_worktree).unwrap();
+        let db = WorktreeDb::open(&home).unwrap();
+        db.register(&WorktreeRecord {
+            id: "linked-source-metadata".to_string(),
+            path: managed_worktree.clone(),
+            source_repo: source_worktree,
+            repo_name: "repo".to_string(),
+            kind: WorktreeKind::Session,
+            creation_mode: "linked".to_string(),
+            git_ref: None,
+            head_commit: None,
+            session_id: Some("linked-source-session".to_string()),
+            creator_pid: None,
+            created_at: 100,
+            last_accessed_at: None,
+            status: xai_fast_worktree::WorktreeStatus::Alive,
+            metadata: Some(build_label_metadata("linked-source", true)),
+        })
+        .unwrap();
+
+        let records = list_worktrees(Some(repo.to_str().unwrap()), &[], false).unwrap();
+        let managed = records
+            .iter()
+            .find(|record| record.path == managed_worktree)
+            .expect("linked worktree should remain listed");
+
+        assert_eq!(managed.id, "linked-source-metadata");
+        assert_eq!(managed.session_id.as_deref(), Some("linked-source-session"));
+    }
+
+    #[test]
+    fn list_worktrees_resolves_managed_standalone_source_chains() {
+        xai_test_utils::require_git!();
+        use xai_test_utils::git::{git_commit_all, init_git_repo};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let repo = root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join("tracked.txt"), "initial").unwrap();
+        git_commit_all(&repo, "initial");
+        let repo = dunce::canonicalize(repo).unwrap();
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let first_path = home.join("worktrees").join("repo-slug").join("first");
+        let second_path = home.join("worktrees").join("repo-slug").join("second");
+        let db = WorktreeDb::open(&home).unwrap();
+        let first = WorktreeRecord {
+            id: "standalone-first".to_string(),
+            path: first_path.clone(),
+            source_repo: repo.clone(),
+            repo_name: "repo".to_string(),
+            kind: WorktreeKind::Session,
+            creation_mode: "standalone".to_string(),
+            git_ref: None,
+            head_commit: None,
+            session_id: Some("standalone-first-session".to_string()),
+            creator_pid: None,
+            created_at: 100,
+            last_accessed_at: None,
+            status: xai_fast_worktree::WorktreeStatus::Alive,
+            metadata: None,
+        };
+        let mut second = first.clone();
+        second.id = "standalone-second".to_string();
+        second.path = second_path;
+        second.source_repo = first_path.join("nested");
+        second.session_id = Some("standalone-second-session".to_string());
+        db.register(&first).unwrap();
+        db.register(&second).unwrap();
+
+        let records = list_worktrees(Some(repo.to_str().unwrap()), &[], false).unwrap();
+        let ids = records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<HashSet<_>>();
+
+        assert!(ids.contains("standalone-first"));
+        assert!(ids.contains("standalone-second"));
+    }
+
+    #[test]
+    fn list_worktrees_from_managed_standalone_uses_original_repository_scope() {
+        xai_test_utils::require_git!();
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let (repo, linked) = repo_with_worktree(&temp);
+        let repo = dunce::canonicalize(repo).unwrap();
+        let linked = dunce::canonicalize(linked).unwrap();
+        let standalone = home.join("worktrees").join("repo-slug").join("standalone");
+        WorktreeBuilder::new(&repo, &standalone)
+            .creation_mode(xai_fast_worktree::CreationMode::Standalone)
+            .worktree_kind(WorktreeKind::Session)
+            .worktree_id("managed-standalone")
+            .session_id("managed-standalone-session")
+            .create()
+            .unwrap();
+        let standalone = dunce::canonicalize(standalone).unwrap();
+
+        let records = list_worktrees(Some(standalone.to_str().unwrap()), &[], false).unwrap();
+
+        assert_eq!(
+            records[0].path, repo,
+            "the original main worktree sorts first"
+        );
+        assert!(records.iter().any(|record| record.path == linked));
+        let managed = records
+            .iter()
+            .find(|record| record.path == standalone)
+            .expect("the current managed standalone worktree remains visible");
+        assert_eq!(managed.id, "managed-standalone");
+        assert_eq!(
+            managed.session_id.as_deref(),
+            Some("managed-standalone-session")
+        );
+    }
+
+    #[test]
+    fn list_worktrees_keeps_separate_git_dir_scope_narrow_from_linked_worktree() {
+        xai_test_utils::require_git!();
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let checkout = root.join("checkout");
+        let git_store = root.join("git-store");
+        git_out(
+            &root,
+            &[
+                "init",
+                "--separate-git-dir",
+                git_store.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+        git_out(&checkout, &["config", "user.name", "AgentDesk Test"]);
+        git_out(
+            &checkout,
+            &["config", "user.email", "agentdesk@example.invalid"],
+        );
+        std::fs::write(checkout.join("tracked.txt"), "initial").unwrap();
+        git_out(&checkout, &["add", "tracked.txt"]);
+        git_out(&checkout, &["commit", "-m", "initial"]);
+        let linked = root.join("linked");
+        git_out(&checkout, &["worktree", "add", linked.to_str().unwrap()]);
+        let git_store = dunce::canonicalize(git_store).unwrap();
+        let linked = dunce::canonicalize(linked).unwrap();
+
+        let records = list_worktrees(Some(linked.to_str().unwrap()), &[], false).unwrap();
+
+        assert_eq!(records[0].path, git_store);
+        assert_ne!(
+            records[0].path, root,
+            "scope must not widen to gitdir parent"
+        );
+        let linked_record = records
+            .iter()
+            .find(|record| record.path == linked)
+            .expect("the requested linked worktree remains visible");
+        assert_eq!(linked_record.creation_mode, "linked");
+    }
+
+    #[test]
+    fn list_worktrees_merges_dead_metadata_into_live_git_worktree() {
+        xai_test_utils::require_git!();
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let (repo, worktree) = repo_with_worktree(&temp);
+        let repo = dunce::canonicalize(repo).unwrap();
+        let worktree = dunce::canonicalize(worktree).unwrap();
+        let db = WorktreeDb::open(&home).unwrap();
+        db.register(&WorktreeRecord {
+            id: "dead-but-live-git".to_string(),
+            path: worktree.clone(),
+            source_repo: repo.clone(),
+            repo_name: "repo".to_string(),
+            kind: WorktreeKind::Session,
+            creation_mode: "linked".to_string(),
+            git_ref: None,
+            head_commit: None,
+            session_id: Some("dead-metadata-session".to_string()),
+            creator_pid: None,
+            created_at: 100,
+            last_accessed_at: None,
+            status: xai_fast_worktree::WorktreeStatus::Dead,
+            metadata: Some(build_label_metadata("dead-metadata", true)),
+        })
+        .unwrap();
+
+        let records = list_worktrees(Some(repo.to_str().unwrap()), &[], false).unwrap();
+        let managed = records
+            .iter()
+            .find(|record| record.path == worktree)
+            .expect("live Git worktree must remain visible");
+
+        assert_eq!(managed.id, "dead-but-live-git");
+        assert_eq!(managed.status, xai_fast_worktree::WorktreeStatus::Alive);
+        assert_eq!(managed.session_id.as_deref(), Some("dead-metadata-session"));
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_refuses_unmanaged_main_repository() {
+        xai_test_utils::require_git!();
+        use xai_test_utils::git::{git_commit_all, init_git_repo};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let repo = root.join("main-repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join("keep.txt"), "must survive").unwrap();
+        git_commit_all(&repo, "initial");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let request = RemoveWorktreeRequest {
+            worktree_path: None,
+            id_or_path: Some(repo.to_string_lossy().into_owned()),
+            force: true,
+            dry_run: false,
+        };
+
+        let error = remove_worktree(&request, &BackgroundCopyContext::new())
+            .await
+            .expect_err("main repository must never be removed as a worktree");
+
+        assert!(error.to_string().contains("main repository"));
+        assert_eq!(
+            std::fs::read_to_string(repo.join("keep.txt")).unwrap(),
+            "must survive"
+        );
+        assert!(repo.join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_refuses_main_repository_with_stale_db_record() {
+        xai_test_utils::require_git!();
+        use xai_test_utils::git::{git_commit_all, init_git_repo};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let repo = root.join("reused-main-repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join("keep.txt"), "must survive stale metadata").unwrap();
+        git_commit_all(&repo, "initial");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let db = WorktreeDb::open(&home).unwrap();
+        db.register(&WorktreeRecord {
+            id: "stale-record".to_string(),
+            path: repo.clone(),
+            source_repo: root.join("old-source"),
+            repo_name: "old-source".to_string(),
+            kind: WorktreeKind::Session,
+            creation_mode: "standalone".to_string(),
+            git_ref: None,
+            head_commit: None,
+            session_id: Some("stale-session".to_string()),
+            creator_pid: None,
+            created_at: 1,
+            last_accessed_at: None,
+            status: xai_fast_worktree::WorktreeStatus::Dead,
+            metadata: None,
+        })
+        .unwrap();
+        let request = RemoveWorktreeRequest {
+            worktree_path: Some(repo.to_string_lossy().into_owned()),
+            id_or_path: None,
+            force: true,
+            dry_run: false,
+        };
+
+        let error = remove_worktree(&request, &BackgroundCopyContext::new())
+            .await
+            .expect_err("stale metadata must not authorize deleting a main repository");
+
+        assert!(error.to_string().contains("main repository"));
+        assert_eq!(
+            std::fs::read_to_string(repo.join("keep.txt")).unwrap(),
+            "must survive stale metadata"
+        );
+        assert!(repo.join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_refuses_managed_path_reused_by_main_repo_with_alive_record() {
+        xai_test_utils::require_git!();
+        use xai_test_utils::git::{git_commit_all, init_git_repo};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let repo = home.join("worktrees").join("repo-slug").join("reused-main");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join("keep.txt"), "must survive alive stale metadata").unwrap();
+        git_commit_all(&repo, "initial");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let db = WorktreeDb::open(&home).unwrap();
+        db.register(&WorktreeRecord {
+            id: "alive-stale-record".to_string(),
+            path: repo.clone(),
+            source_repo: root.join("old-source"),
+            repo_name: "old-source".to_string(),
+            kind: WorktreeKind::Session,
+            creation_mode: "standalone".to_string(),
+            git_ref: None,
+            head_commit: None,
+            session_id: Some("alive-stale-session".to_string()),
+            creator_pid: None,
+            created_at: 1,
+            last_accessed_at: None,
+            status: xai_fast_worktree::WorktreeStatus::Alive,
+            metadata: None,
+        })
+        .unwrap();
+        let request = RemoveWorktreeRequest {
+            worktree_path: Some(repo.to_string_lossy().into_owned()),
+            id_or_path: None,
+            force: true,
+            dry_run: false,
+        };
+
+        let error = remove_worktree(&request, &BackgroundCopyContext::new())
+            .await
+            .expect_err(
+                "an alive stale DB row without a source marker must not authorize deletion",
+            );
+
+        assert!(error.to_string().contains("main repository"));
+        assert_eq!(
+            std::fs::read_to_string(repo.join("keep.txt")).unwrap(),
+            "must survive alive stale metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_allows_unmanaged_linked_worktree() {
+        xai_test_utils::require_git!();
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let (repo, worktree) = repo_with_worktree(&temp);
+        let request = RemoveWorktreeRequest {
+            worktree_path: None,
+            id_or_path: Some(worktree.to_string_lossy().into_owned()),
+            force: false,
+            dry_run: false,
+        };
+
+        let response = remove_worktree(&request, &BackgroundCopyContext::new())
+            .await
+            .expect("linked worktree should remain removable");
+
+        assert!(response.removed);
+        assert!(!worktree.exists());
+        assert!(repo.join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_requires_force_for_dirty_unmanaged_linked_worktree() {
+        xai_test_utils::require_git!();
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let (repo, worktree) = repo_with_worktree(&temp);
+        std::fs::write(worktree.join("tracked.txt"), "dirty content").unwrap();
+        std::fs::write(worktree.join("untracked.txt"), "untracked content").unwrap();
+        let request = RemoveWorktreeRequest {
+            worktree_path: Some(worktree.to_string_lossy().into_owned()),
+            id_or_path: None,
+            force: false,
+            dry_run: false,
+        };
+
+        remove_worktree(&request, &BackgroundCopyContext::new())
+            .await
+            .expect_err("force=false must preserve dirty linked worktrees");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("tracked.txt")).unwrap(),
+            "dirty content"
+        );
+        assert!(worktree.join("untracked.txt").exists());
+
+        let force_request = RemoveWorktreeRequest {
+            force: true,
+            ..request
+        };
+        let response = remove_worktree(&force_request, &BackgroundCopyContext::new())
+            .await
+            .expect("force=true should remove the dirty linked worktree");
+        assert!(response.removed);
+        assert!(!worktree.exists());
+        assert!(repo.join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_requires_force_for_dirty_managed_standalone_worktree() {
+        xai_test_utils::require_git!();
+        use xai_test_utils::git::{git_commit_all, init_git_repo};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let repo = root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join("tracked.txt"), "original").unwrap();
+        git_commit_all(&repo, "initial");
+        let standalone = home.join("worktrees").join("repo-slug").join("standalone");
+        WorktreeBuilder::new(&repo, &standalone)
+            .creation_mode(xai_fast_worktree::CreationMode::Standalone)
+            .worktree_kind(WorktreeKind::Session)
+            .session_id("standalone-session")
+            .create()
+            .unwrap();
+        std::fs::write(standalone.join("tracked.txt"), "dirty standalone").unwrap();
+        let request = RemoveWorktreeRequest {
+            worktree_path: Some(standalone.to_string_lossy().into_owned()),
+            id_or_path: None,
+            force: false,
+            dry_run: false,
+        };
+
+        remove_worktree(&request, &BackgroundCopyContext::new())
+            .await
+            .expect_err("force=false must preserve dirty standalone worktrees");
+        assert_eq!(
+            std::fs::read_to_string(standalone.join("tracked.txt")).unwrap(),
+            "dirty standalone"
+        );
+
+        let force_request = RemoveWorktreeRequest {
+            force: true,
+            ..request
+        };
+        let response = remove_worktree(&force_request, &BackgroundCopyContext::new())
+            .await
+            .expect("force=true should remove the dirty standalone worktree");
+        assert!(response.removed);
+        assert!(!standalone.exists());
+        assert!(repo.join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_allows_marked_managed_fast_worktree_with_linked_mode() {
+        xai_test_utils::require_git!();
+        use xai_test_utils::git::{git_commit_all, init_git_repo};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let repo = root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join("tracked.txt"), "original").unwrap();
+        git_commit_all(&repo, "initial");
+        let managed = home.join("worktrees").join("repo-slug").join("cow-linked");
+        WorktreeBuilder::new(&repo, &managed)
+            .creation_mode(xai_fast_worktree::CreationMode::Standalone)
+            .worktree_kind(WorktreeKind::Session)
+            .worktree_id("managed-fast-linked")
+            .session_id("managed-fast-linked-session")
+            .create()
+            .unwrap();
+        let db = WorktreeDb::open(&home).unwrap();
+        let mut record = db
+            .get_by_id("managed-fast-linked")
+            .unwrap()
+            .expect("builder should register managed worktree metadata");
+        record.creation_mode = "linked".to_string();
+        db.register(&record).unwrap();
+        let request = RemoveWorktreeRequest {
+            worktree_path: Some(managed.to_string_lossy().into_owned()),
+            id_or_path: None,
+            force: true,
+            dry_run: false,
+        };
+
+        let response = remove_worktree(&request, &BackgroundCopyContext::new())
+            .await
+            .expect("a valid source marker should authorize managed CoW cleanup");
+
+        assert!(response.removed);
+        assert!(!managed.exists());
+        assert!(repo.join(".git").exists());
+        assert!(db.get_by_id("managed-fast-linked").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_requires_force_for_locked_unmanaged_linked_worktree() {
+        xai_test_utils::require_git!();
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let (repo, worktree) = repo_with_worktree(&temp);
+        git_out(&repo, &["worktree", "lock", worktree.to_str().unwrap()]);
+        let request = RemoveWorktreeRequest {
+            worktree_path: Some(worktree.to_string_lossy().into_owned()),
+            id_or_path: None,
+            force: false,
+            dry_run: false,
+        };
+
+        remove_worktree(&request, &BackgroundCopyContext::new())
+            .await
+            .expect_err("force=false must preserve locked linked worktrees");
+        assert!(worktree.exists());
+
+        let force_request = RemoveWorktreeRequest {
+            force: true,
+            ..request
+        };
+        let response = remove_worktree(&force_request, &BackgroundCopyContext::new())
+            .await
+            .expect("force=true should remove the locked linked worktree");
+        assert!(response.removed);
+        assert!(!worktree.exists());
+    }
+
+    #[tokio::test]
+    async fn remove_worktree_dry_run_preserves_linked_worktree() {
+        xai_test_utils::require_git!();
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let home = root.join("grok-home");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let (repo, worktree) = repo_with_worktree(&temp);
+        let request = RemoveWorktreeRequest {
+            worktree_path: None,
+            id_or_path: Some(worktree.to_string_lossy().into_owned()),
+            force: false,
+            dry_run: true,
+        };
+
+        let response = remove_worktree(&request, &BackgroundCopyContext::new())
+            .await
+            .expect("dry-run should validate a linked worktree");
+
+        assert!(!response.removed);
+        assert!(worktree.exists());
+        assert!(repo.join(".git").exists());
+    }
+
+    #[test]
+    fn removal_validation_refuses_owned_primary_jj_repository() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let home = temp.path().join("grok-home");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let workspace = home
+            .join("worktrees")
+            .join("repo-slug")
+            .join("jj-workspace");
+        std::fs::create_dir_all(workspace.join(".jj").join("repo")).unwrap();
+
+        let error = ensure_removable_worktree(&workspace)
+            .expect_err("a primary jj repository must never be removed as a secondary workspace");
+        assert!(error.to_string().contains("primary jj repository"));
+    }
+
+    #[tokio::test]
+    async fn remove_jj_workspace_rejects_unowned_marker_directory() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let home = temp.path().join("grok-home");
+        let _env = crate::LockedTestEnv::lock().set("GROK_HOME", &home);
+        let workspace = temp.path().join("unowned-jj-repository");
+        std::fs::create_dir_all(workspace.join(".jj").join("repo")).unwrap();
+        std::fs::write(workspace.join("keep.txt"), "must survive").unwrap();
+
+        let error = remove_jj_workspace(&workspace.to_string_lossy())
+            .await
+            .expect_err(
+                "a .jj marker outside the managed worktree root must not authorize deletion",
+            );
+
+        assert!(error.to_string().contains("AgentDesk-managed worktree"));
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("keep.txt")).unwrap(),
+            "must survive"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn worktree_path_key_normalizes_verbatim_nonexistent_path() {
+        let regular = Path::new(r"C:\nonexistent-agentdesk-path\worktree");
+        let verbatim = Path::new(r"\\?\C:\nonexistent-agentdesk-path\worktree");
+
+        assert_eq!(worktree_path_key(regular), worktree_path_key(verbatim));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn worktree_path_key_handles_non_ascii_windows_path_without_panicking() {
+        let path = Path::new(r"C:\目录\worktree");
+
+        assert_eq!(worktree_path_key(path), "c:/目录/worktree");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn worktree_path_key_normalizes_verbatim_unc_nonexistent_path() {
+        let regular = Path::new(r"\\server\share\nonexistent-agentdesk-path\worktree");
+        let verbatim = Path::new(r"\\?\UNC\server\share\nonexistent-agentdesk-path\worktree");
+
+        assert_eq!(worktree_path_key(regular), worktree_path_key(verbatim));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn git_worktree_parser_rejects_invalid_windows_utf8_path() {
+        let input = b"worktree C:\\repo-\xff\0HEAD abc123\0\0";
+
+        assert!(parse_git_worktree_porcelain(input).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_worktree_parser_preserves_non_utf8_unix_path() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let input = b"worktree /tmp/repo-\xff\0HEAD abc123\0\0";
+        let entries = parse_git_worktree_porcelain(input).unwrap();
+
+        assert_eq!(
+            entries[0].path.as_ref().unwrap().as_os_str().as_bytes(),
+            b"/tmp/repo-\xff"
+        );
     }
 
     /// Happy path: the snapshot ref resolves and the worktree dir is removed.

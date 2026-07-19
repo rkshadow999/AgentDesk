@@ -434,6 +434,7 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   const sessionListStatusRef = useRef<SessionListStatus>(previewMode ? "loaded" : "loading");
   const sessionListRequestRef = useRef<SessionListRequest | undefined>(undefined);
   const runtimeDashboardRequestSessionRef = useRef<string | undefined>(undefined);
+  const worktreesRef = useRef<WorktreeRecord[]>([]);
   const worktreeOperationRef = useRef<WorktreeOperation | undefined>(undefined);
   const createdWorktreeRefreshRef = useRef<CreatedWorktreeRefresh | undefined>(undefined);
   const worktreeGcOpenRef = useRef(false);
@@ -870,6 +871,7 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
           resetWorkspaceContextState();
           clearCreatedWorktreeRefresh();
           clearPendingAttachments();
+          worktreesRef.current = [];
           setWorktrees([]);
           setSelectedWorktree(undefined);
           setWorktreeStatus("idle");
@@ -1298,6 +1300,14 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
           setRewindError("");
         }
         break;
+      case "session/rewind/points/error":
+        if (event.sessionId === rewindSessionIdRef.current) {
+          setRewindPoints([]);
+          setSelectedRewindPoint(undefined);
+          updateRewindPointsLoading(false);
+          setRewindError(event.message);
+        }
+        break;
       case "session/rewound":
         if (event.sessionId !== rewindSessionIdRef.current) {
           break;
@@ -1454,6 +1464,7 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
           break;
         }
         updateWorktreeOperation(undefined);
+        worktreesRef.current = event.worktrees;
         setWorktrees(event.worktrees);
         setSelectedWorktree((current) => current
           ? event.worktrees.find((worktree) => worktree.id === current.id)
@@ -1496,16 +1507,23 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
         }
         updateWorktreeOperation(undefined);
         if (event.removed) {
-          setWorktrees((current) => current.filter((worktree) =>
+          const removedWorktree = worktreesRef.current.find((worktree) =>
+            worktree.id === event.idOrPath ||
+            worktree.path === event.idOrPath ||
+            worktree.path === event.resolvedPath);
+          worktreesRef.current = worktreesRef.current.filter((worktree) =>
             worktree.id !== event.idOrPath &&
             worktree.path !== event.idOrPath &&
-            worktree.path !== event.resolvedPath));
+            worktree.path !== event.resolvedPath);
+          setWorktrees(worktreesRef.current);
           setSelectedWorktree((current) => current &&
-            (current.id === event.idOrPath || current.path === event.resolvedPath)
+            (current.id === event.idOrPath || current.path === event.idOrPath ||
+             current.path === event.resolvedPath)
             ? undefined
             : current);
           if (worktreeReviewDraftRef.current &&
-              worktreeReviewDraftRef.current.worktreeId === event.idOrPath) {
+              (worktreeReviewDraftRef.current.worktreeId === event.idOrPath ||
+               worktreeReviewDraftRef.current.worktreeId === removedWorktree?.id)) {
             updateWorktreeReviewDraft(undefined);
           }
         }
@@ -2007,14 +2025,14 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   }
 
   function inspectWorktree(worktree: WorktreeRecord) {
-    if (!beginWorktreeOperation("show")) {
+    if (worktreeOperationRef.current) {
       return;
     }
-    bridge.send({
-      type: "worktree/show",
-      workspaceGeneration: workspaceGenerationRef.current,
-      idOrPath: worktree.id
-    });
+    setSelectedWorktree(worktree);
+    if (worktreeReviewDraftRef.current?.worktreeId !== worktree.id) {
+      updateWorktreeReviewDraft(undefined);
+    }
+    setWorktreeError("");
   }
 
   function reviewWorktree(worktree: WorktreeRecord) {
@@ -2057,7 +2075,8 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   }
 
   function applyWorktree(worktree: WorktreeRecord) {
-    if (!activeSessionIdRef.current || worktreeOperationRef.current) {
+    if (!activeSessionIdRef.current || worktreeOperationRef.current ||
+        isMainGitWorktree(worktree)) {
       return;
     }
     setWorktreeApplyTarget(worktree);
@@ -2067,7 +2086,8 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   function submitWorktreeApply() {
     const sessionId = activeSessionIdRef.current;
     const worktree = worktreeApplyTarget;
-    if (!sessionId || !worktree || !beginWorktreeOperation("apply")) {
+    if (!sessionId || !worktree || isMainGitWorktree(worktree) ||
+        !beginWorktreeOperation("apply")) {
       return;
     }
     bridge.send({
@@ -2081,7 +2101,7 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   }
 
   function removeWorktree(worktree: WorktreeRecord) {
-    if (worktreeOperationRef.current ||
+    if (isMainGitWorktree(worktree) || worktreeOperationRef.current ||
         !window.confirm(t("removeWorktreeConfirm").replace("{label}", worktreeLabel(worktree)))) {
       return;
     }
@@ -2091,7 +2111,7 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
     bridge.send({
       type: "worktree/remove",
       workspaceGeneration: workspaceGenerationRef.current,
-      idOrPath: worktree.id,
+      idOrPath: worktree.path,
       force: false,
       dryRun: false
     });
@@ -2862,7 +2882,7 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
           (index - 1 + commandMatches.length) % commandMatches.length);
         return;
       }
-      if (event.key === "Enter" && !event.ctrlKey && !event.metaKey) {
+      if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
         event.preventDefault();
         selectRuntimeCommand(commandMatches[commandPaletteIndex] ?? commandMatches[0]);
         return;
@@ -2886,15 +2906,14 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
           (index - 1 + fileSearchResults.length) % fileSearchResults.length);
         return;
       }
-      if (event.key === "Enter" && !event.ctrlKey && !event.metaKey) {
+      if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
         event.preventDefault();
         selectFileReference(fileSearchResults[fileReferenceIndex] ?? fileSearchResults[0]);
         return;
       }
     }
 
-    if (!event.nativeEvent.isComposing && event.key === "Enter" &&
-        (event.ctrlKey || event.metaKey)) {
+    if (!event.nativeEvent.isComposing && event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       sendPrompt();
     }
@@ -6800,6 +6819,7 @@ function WorktreeDashboard({
             <section className="worktree-list" aria-label={t("worktreeList")}>
               {worktrees.map((worktree) => {
                 const label = worktreeLabel(worktree);
+                const mainGitWorktree = isMainGitWorktree(worktree);
                 return (
                   <article
                     key={worktree.id}
@@ -6833,7 +6853,8 @@ function WorktreeDashboard({
                         type="button"
                         aria-label={t("applyWorktreeLabel").replace("{label}", label)}
                         title={t("applyWorktree")}
-                        disabled={busy || !activeSessionId || worktree.status !== "alive"}
+                        disabled={busy || !activeSessionId || worktree.status !== "alive" ||
+                          mainGitWorktree}
                         onClick={() => onApply(worktree)}
                       ><GitMerge size={14} /></button>
                       <button
@@ -6841,7 +6862,7 @@ function WorktreeDashboard({
                         className="danger"
                         aria-label={t("removeWorktreeLabel").replace("{label}", label)}
                         title={t("removeWorktree")}
-                        disabled={busy}
+                        disabled={busy || mainGitWorktree}
                         onClick={() => onRemove(worktree)}
                       ><Trash2 size={14} /></button>
                     </div>
@@ -7284,6 +7305,11 @@ function worktreeLabel(worktree: WorktreeRecord): string {
 function sameWorktreePath(left: string, right: string): boolean {
   const normalize = (value: string) => value.replaceAll("/", "\\").toLocaleLowerCase();
   return normalize(left) === normalize(right);
+}
+
+function isMainGitWorktree(worktree: WorktreeRecord): boolean {
+  return worktree.kind === "manual" &&
+    sameWorktreePath(worktree.path, worktree.sourceRepository);
 }
 
 function formatSessionTime(timestamp: string, language: UiLanguage): string {

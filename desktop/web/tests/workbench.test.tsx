@@ -338,19 +338,78 @@ describe("Workbench", () => {
     expect(create).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "查看工作树：Parser experiment" }));
-    expect(bridge.commands).toContainEqual({
-      type: "worktree/show",
-      workspaceGeneration: 1,
-      idOrPath: "worktree-7"
-    });
-    emitWorktreeEvent(bridge, {
-      type: "worktree/detail",
-      workspaceGeneration: 1,
-      worktree: worktreeRecord()
-    });
 
     expect(screen.getByRole("heading", { name: "工作树详情" })).toBeInTheDocument();
     expect(screen.getByText("feature/parser")).toBeInTheDocument();
+    expect(commandsOfType(bridge, "worktree/show")).toHaveLength(0);
+  });
+
+  it("selects the main Git worktree directly from the list snapshot", () => {
+    const bridge = new RecordingBridge();
+    render(<Workbench bridge={bridge} />);
+    fireEvent.click(screen.getByRole("button", { name: "工作树" }));
+    const mainWorktree = {
+      ...worktreeRecord(),
+      id: "git-main-repo",
+      path: "C:\\repo",
+      sourceRepository: "C:\\repo",
+      creationType: "standalone" as const,
+      gitReference: "main",
+      metadata: { label: "Main repository", userProvided: false }
+    };
+    emitWorktreeEvent(bridge, worktreeListChanged([mainWorktree], 1));
+
+    expect(screen.getByText("Main repository")).toBeInTheDocument();
+    expect(screen.getByText("C:\\repo")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看工作树：Main repository" }));
+
+    const details = screen.getByRole("heading", { name: "工作树详情" }).closest("section");
+    expect(details).not.toBeNull();
+    expect(within(details!).getByText("Main repository")).toBeInTheDocument();
+    expect(within(details!).getAllByText("C:\\repo")).toHaveLength(2);
+    expect(within(details!).getByText("main")).toBeInTheDocument();
+    expect(commandsOfType(bridge, "worktree/show")).toHaveLength(0);
+  });
+
+  it("protects the main Git worktree while keeping linked worktree actions enabled", () => {
+    const bridge = new RecordingBridge();
+    render(<Workbench bridge={bridge} />);
+    act(() => bridge.emit({
+      type: "engine/status",
+      status: "ready",
+      sessionId: "session-42"
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "工作树" }));
+    const mainWorktree = {
+      ...worktreeRecord(),
+      id: "git-main-repo",
+      path: "C:\\repo",
+      sourceRepository: "C:\\repo",
+      creationType: "standalone" as const,
+      gitReference: "main",
+      metadata: { label: "Main repository", userProvided: false }
+    };
+    emitWorktreeEvent(bridge, worktreeListChanged([mainWorktree, worktreeRecord()], 1));
+
+    expect(screen.getByRole("button", { name: "应用工作树：Main repository" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "移除工作树：Main repository" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "应用工作树：Parser experiment" })).toBeEnabled();
+    const removeLinked = screen.getByRole("button", { name: "移除工作树：Parser experiment" });
+    expect(removeLinked).toBeEnabled();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    try {
+      fireEvent.click(removeLinked);
+    }
+    finally {
+      confirm.mockRestore();
+    }
+    expect(bridge.commands).toContainEqual({
+      type: "worktree/remove",
+      workspaceGeneration: 1,
+      idOrPath: "C:\\repo\\.worktrees\\parser",
+      force: false,
+      dryRun: false
+    });
   });
 
   it("polls a bounded number of times after worktree creation and clears timers on unmount", () => {
@@ -517,6 +576,45 @@ describe("Workbench", () => {
     expect(commandsOfType(bridge, "engine/prompt")).toHaveLength(0);
   });
 
+  it("clears the selected worktree and review draft after path-based removal", () => {
+    const bridge = new RecordingBridge();
+    render(<Workbench bridge={bridge} />);
+    act(() => bridge.emit({
+      type: "engine/status",
+      status: "ready",
+      sessionId: "session-42"
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "工作树" }));
+    emitWorktreeEvent(bridge, worktreeListChanged([worktreeRecord()], 1));
+    fireEvent.click(screen.getByRole("button", { name: "查看工作树：Parser experiment" }));
+    fireEvent.click(screen.getByRole("button", { name: zhCn.reviewWorktree }));
+    expect(screen.getByRole("textbox", { name: zhCn.worktreeReviewRequest })).toBeInTheDocument();
+
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "移除工作树：Parser experiment" }));
+    }
+    finally {
+      confirm.mockRestore();
+    }
+    emitWorktreeEvent(bridge, {
+      type: "worktree/removed",
+      workspaceGeneration: 1,
+      idOrPath: "C:\\repo\\.worktrees\\parser",
+      removed: true
+    });
+
+    expect(screen.queryByRole("textbox", { name: zhCn.worktreeReviewRequest }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: zhCn.reviewWorktree }))
+      .not.toBeInTheDocument();
+
+    emitWorktreeEvent(bridge, worktreeListChanged([worktreeRecord()], 1));
+    fireEvent.click(screen.getByRole("button", { name: "查看工作树：Parser experiment" }));
+    expect(screen.queryByRole("textbox", { name: zhCn.worktreeReviewRequest }))
+      .not.toBeInTheDocument();
+  });
+
   it("rejects worktree review metadata above the bounded prompt context", () => {
     const bridge = new RecordingBridge();
     render(<Workbench bridge={bridge} />);
@@ -605,7 +703,7 @@ describe("Workbench", () => {
     expect(bridge.commands).toContainEqual({
       type: "worktree/remove",
       workspaceGeneration: 1,
-      idOrPath: "worktree-7",
+      idOrPath: "C:\\repo\\.worktrees\\parser",
       force: false,
       dryRun: false
     });
@@ -2530,6 +2628,33 @@ describe("Workbench", () => {
     });
   });
 
+  it("shows rewind point failures locally without changing the ready engine status", () => {
+    const bridge = new RecordingBridge();
+    render(<Workbench bridge={bridge} />);
+    act(() => {
+      bridge.emit({
+        type: "session/active/changed",
+        sessionId: "session-42",
+        workspacePath: "C:\\workspace",
+        engineEpoch: 0
+      });
+      bridge.emit({ type: "engine/status", status: "ready", sessionId: "session-42" });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "回退会话" }));
+    const dialog = screen.getByRole("dialog", { name: "回退会话" });
+    expect(within(dialog).getByRole("status")).toBeInTheDocument();
+    act(() => bridge.emit({
+      type: "session/rewind/points/error",
+      sessionId: "session-42",
+      message: "无法读取回退检查点。"
+    } as unknown as HostEvent));
+
+    expect(within(dialog).queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByText("无法读取回退检查点。")).toBeInTheDocument();
+    expect(screen.queryByText("引擎错误")).not.toBeInTheDocument();
+  });
+
   it("trims transcript after a successful rewind and restores the target prompt", async () => {
     const bridge = new RecordingBridge();
     render(<Workbench bridge={bridge} />);
@@ -3396,17 +3521,47 @@ describe("Workbench", () => {
     expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
   });
 
+  it("submits the composer with Enter", () => {
+    const bridge = new RecordingBridge();
+    render(<Workbench bridge={bridge} />);
+    const composer = screen.getByPlaceholderText("向 AgentDesk 描述任务");
+    fireEvent.change(composer, { target: { value: "使用回车发送" } });
+
+    fireEvent.keyDown(composer, { key: "Enter" });
+
+    expect(screen.getByRole("alertdialog", { name: "确认本机非沙箱执行" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "继续本机执行" }));
+    expect(bridge.commands).toContainEqual(expect.objectContaining({
+      type: "engine/prompt",
+      text: "使用回车发送"
+    }));
+    expect(composer).toHaveValue("");
+  });
+
+  it("keeps Shift+Enter available for a composer newline", () => {
+    const bridge = new RecordingBridge();
+    render(<Workbench bridge={bridge} />);
+    const composer = screen.getByPlaceholderText("向 AgentDesk 描述任务");
+    fireEvent.change(composer, { target: { value: "第一行" } });
+
+    expect(fireEvent.keyDown(composer, { key: "Enter", shiftKey: true })).toBe(true);
+    fireEvent.change(composer, { target: { value: "第一行\n第二行" } });
+
+    expect(composer).toHaveValue("第一行\n第二行");
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(bridge.commands).not.toContainEqual(expect.objectContaining({ type: "engine/prompt" }));
+  });
+
   it("does not submit while a Chinese IME composition is active", () => {
     const bridge = new RecordingBridge();
     render(<Workbench bridge={bridge} />);
     const composer = screen.getByPlaceholderText("向 AgentDesk 描述任务");
     fireEvent.change(composer, { target: { value: "正在输入中文" } });
 
-    fireEvent.keyDown(composer, {
+    expect(fireEvent.keyDown(composer, {
       key: "Enter",
-      ctrlKey: true,
       isComposing: true
-    });
+    })).toBe(true);
 
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
     expect(composer).toHaveValue("正在输入中文");

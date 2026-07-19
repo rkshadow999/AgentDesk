@@ -813,6 +813,7 @@ export type HostEvent =
     }
   | { type: "session/compacted"; sessionId: string }
   | { type: "session/rewind/points"; sessionId: string; points: SessionRewindPoint[] }
+  | { type: "session/rewind/points/error"; sessionId: string; message: string }
   | {
       type: "session/rewound";
       sessionId: string;
@@ -1609,6 +1610,11 @@ function parseHostEvent(
         : null;
     case "session/rewind/points":
       return parseSessionRewindPoints(value);
+    case "session/rewind/points/error":
+      return isNonEmptyString(value.sessionId) &&
+        isBoundedNonEmptyString(value.message, 4096)
+        ? { type: value.type, sessionId: value.sessionId, message: value.message }
+        : null;
     case "session/rewound":
       return parseSessionRewound(value);
     case "session/mode/changed":
@@ -4580,6 +4586,7 @@ const hostEventKeys: Readonly<Record<string, readonly string[]>> = {
   ],
   "session/compacted": ["schemaVersion", "type", "sessionId"],
   "session/rewind/points": ["schemaVersion", "type", "sessionId", "points"],
+  "session/rewind/points/error": ["schemaVersion", "type", "sessionId", "message"],
   "session/rewound": [
     "schemaVersion", "type", "sessionId", "success", "targetPromptIndex", "mode",
     "revertedFiles", "cleanFiles", "conflicts", "promptText", "error"

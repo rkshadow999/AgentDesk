@@ -2366,6 +2366,11 @@ describe("createHostBridge", () => {
         }]
       },
       {
+        type: "session/rewind/points/error",
+        sessionId: "session-42",
+        message: "Rewind checkpoints could not be loaded."
+      },
+      {
         type: "session/rewound",
         sessionId: "session-42",
         success: false,
@@ -2405,6 +2410,11 @@ describe("createHostBridge", () => {
           hasFileChanges: true,
           promptPreview: "Refactor parser"
         }]
+      },
+      {
+        type: "session/rewind/points/error",
+        sessionId: "session-42",
+        message: "Rewind checkpoints could not be loaded."
       },
       {
         type: "session/rewound",

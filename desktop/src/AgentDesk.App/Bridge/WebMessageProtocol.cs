@@ -509,6 +509,13 @@ public static class WebMessageProtocol
                     point.PromptPreview,
                 }),
             },
+            SessionRewindPointsErrorWebEvent value => new
+            {
+                schemaVersion = SchemaVersion,
+                type = "session/rewind/points/error",
+                value.SessionId,
+                value.Message,
+            },
             SessionRewoundWebEvent value => new
             {
                 schemaVersion = SchemaVersion,
@@ -4483,6 +4490,10 @@ public sealed record SessionCompactedWebEvent(string SessionId) : WebEvent;
 public sealed record SessionRewindPointsWebEvent(
     string SessionId,
     IReadOnlyList<SessionRewindPoint> Points) : WebEvent;
+
+public sealed record SessionRewindPointsErrorWebEvent(
+    string SessionId,
+    string Message) : WebEvent;
 
 public sealed record SessionRewoundWebEvent(
     string SessionId,

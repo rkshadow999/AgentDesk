@@ -661,6 +661,34 @@ public sealed class AgentDeskHostControllerTests
     }
 
     [Fact]
+    public async Task WorktreeListFailure_RemainsLocalAndPreservesReadyEngineStatus()
+    {
+        var fixture = new ControllerFixture();
+        fixture.Credentials.Save("xai", "xai-test-key");
+        var engine = fixture.Factory.EnqueueEngine("C:\\workspace", "session-42");
+        engine.ListWorktreesHandler = (_, _) =>
+            Task.FromException<IReadOnlyList<WorktreeRecord>>(
+                new InvalidOperationException("git worktree list failed"));
+        await using var controller = fixture.CreateController();
+        await controller.HandleAsync(
+            new PromptWebCommand("initialize", ExecutionProfile.NativeProtected));
+        fixture.Events.Clear();
+
+        await controller.HandleAsync(
+            new WorktreeListWebCommand(1, IncludeAll: false, Types: []));
+
+        var events = fixture.Events.Snapshot();
+        Assert.Single(events.OfType<WorktreeErrorWebEvent>());
+        Assert.DoesNotContain(events, item => item is EngineStatusWebEvent { Status: "error" });
+
+        fixture.Events.Clear();
+        await controller.HandleAsync(new UiReadyWebCommand());
+        Assert.Contains(
+            fixture.Events.Snapshot(),
+            item => item is EngineStatusWebEvent { Status: "ready", SessionId: "session-42" });
+    }
+
+    [Fact]
     public async Task WorktreeList_DropsALateResultAfterTheWorkspaceChanges()
     {
         var fixture = new ControllerFixture();
@@ -2652,6 +2680,36 @@ public sealed class AgentDeskHostControllerTests
             fixture.Events.Snapshot().OfType<SessionRewindPointsWebEvent>(),
             item => item.SessionId == "session-42" && Assert.Single(item.Points) == point);
         Assert.Contains(new SessionRewoundWebEvent("session-42", result), fixture.Events.Snapshot());
+    }
+
+    [Fact]
+    public async Task RewindPointsFailure_PublishesLocalErrorWithoutChangingReadyEngineStatus()
+    {
+        var fixture = new ControllerFixture();
+        var engine = fixture.Factory.EnqueueEngine("C:\\workspace", "session-42");
+        engine.RewindPointsHandler = (_, _) =>
+            Task.FromException<IReadOnlyList<SessionRewindPoint>>(
+                new NotSupportedException("rewind points unavailable"));
+        await using var controller = fixture.CreateController();
+        await controller.HandleAsync(
+            new PromptWebCommand("initialize", ExecutionProfile.NativeProtected));
+        fixture.Events.Clear();
+
+        await controller.HandleAsync(new SessionRewindPointsWebCommand("session-42"));
+
+        var events = fixture.Events.Snapshot();
+        Assert.DoesNotContain(events, item => item is SessionRewindPointsWebEvent);
+        var error = Assert.Single(events.OfType<SessionRewindPointsErrorWebEvent>());
+        Assert.Equal("session-42", error.SessionId);
+        Assert.NotEmpty(error.Message);
+        Assert.DoesNotContain("rewind points unavailable", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(events, item => item is EngineStatusWebEvent { Status: "error" });
+
+        fixture.Events.Clear();
+        await controller.HandleAsync(new UiReadyWebCommand());
+        Assert.Contains(
+            fixture.Events.Snapshot(),
+            item => item is EngineStatusWebEvent { Status: "ready", SessionId: "session-42" });
     }
 
     [Fact]

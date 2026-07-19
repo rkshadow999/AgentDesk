@@ -34,6 +34,9 @@ public sealed partial class AgentDeskHostController :
     private string EngineErrorMessage => Message(
         "\u5f15\u64ce\u64cd\u4f5c\u5931\u8d25\u3002",
         "The engine operation failed.");
+    private string RewindPointsErrorMessage => Message(
+        "\u65e0\u6cd5\u8bfb\u53d6\u56de\u9000\u68c0\u67e5\u70b9\u3002",
+        "Rewind checkpoints could not be loaded.");
     private string EngineConnectionLostMessage => Message(
         "\u5f15\u64ce\u8fde\u63a5\u5df2\u4e2d\u65ad\uff0c\u4e0b\u6b21\u8bf7\u6c42\u5c06\u81ea\u52a8\u91cd\u542f\u3002",
         "The engine connection was lost and will restart on the next request.");
@@ -1470,8 +1473,7 @@ public sealed partial class AgentDeskHostController :
         SessionRewindPointsWebCommand command,
         CancellationToken cancellationToken)
     {
-        SessionRewindPointsWebEvent? pointsEvent = null;
-        EngineStatusWebEvent? errorEvent = null;
+        WebEvent? resultEvent = null;
 
         await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -1483,11 +1485,13 @@ public sealed partial class AgentDeskHostController :
                 var points = await client
                     .GetRewindPointsAsync(sessionId, cancellationToken)
                     .ConfigureAwait(false);
-                pointsEvent = new SessionRewindPointsWebEvent(sessionId.Value, points);
+                resultEvent = new SessionRewindPointsWebEvent(sessionId.Value, points);
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {
-                errorEvent = SetStatusUnsafe("error", EngineErrorMessage, _sessionId?.Value);
+                resultEvent = new SessionRewindPointsErrorWebEvent(
+                    command.SessionId,
+                    RewindPointsErrorMessage);
             }
         }
         finally
@@ -1495,13 +1499,9 @@ public sealed partial class AgentDeskHostController :
             _stateGate.Release();
         }
 
-        if (pointsEvent is not null)
+        if (resultEvent is not null)
         {
-            Publish(pointsEvent);
-        }
-        if (errorEvent is not null)
-        {
-            Publish(errorEvent);
+            Publish(resultEvent);
         }
     }
 

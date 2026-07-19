@@ -1390,6 +1390,18 @@ public sealed class WebMessageProtocolTests
             3,
             points.RootElement.GetProperty("points")[0].GetProperty("promptIndex").GetInt32());
 
+        var pointsErrorJson = WebMessageProtocol.SerializeEvent(
+            new SessionRewindPointsErrorWebEvent(
+                "session-42",
+                "Rewind checkpoints could not be loaded."));
+        using var pointsError = JsonDocument.Parse(pointsErrorJson);
+        Assert.Equal(
+            "session/rewind/points/error",
+            pointsError.RootElement.GetProperty("type").GetString());
+        Assert.Equal(
+            "Rewind checkpoints could not be loaded.",
+            pointsError.RootElement.GetProperty("message").GetString());
+
         var rewoundJson = WebMessageProtocol.SerializeEvent(
             new SessionRewoundWebEvent(
                 "session-42",
