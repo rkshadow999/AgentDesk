@@ -646,7 +646,7 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
     } else {
       clearCreatedWorktreeRefresh();
     }
-  }, [activeSurface, bridge]);
+  }, [activeSurface, bridge, workspaceGeneration]);
 
   useEffect(() => () => clearCreatedWorktreeRefresh(), []);
 

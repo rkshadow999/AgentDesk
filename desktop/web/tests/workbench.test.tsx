@@ -279,6 +279,40 @@ describe("Workbench", () => {
     expect(commandsOfType(bridge, "worktree/list")).toHaveLength(2);
   });
 
+  it("refreshes worktrees when the workspace arrives after opening the surface", () => {
+    const bridge = new RecordingBridge(null);
+    render(<Workbench bridge={bridge} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "工作树" }));
+    expect(commandsOfType(bridge, "worktree/list")).toEqual([{
+      type: "worktree/list",
+      workspaceGeneration: 0,
+      includeAll: false,
+      types: []
+    }]);
+
+    act(() => bridge.emit({
+      type: "workspace/selected",
+      path: "C:\\workspace",
+      workspaceGeneration: 7
+    }));
+
+    expect(commandsOfType(bridge, "worktree/list")).toEqual([
+      {
+        type: "worktree/list",
+        workspaceGeneration: 0,
+        includeAll: false,
+        types: []
+      },
+      {
+        type: "worktree/list",
+        workspaceGeneration: 7,
+        includeAll: false,
+        types: []
+      }
+    ]);
+  });
+
   it("creates and inspects worktrees for the active session", () => {
     const bridge = new RecordingBridge();
     render(<Workbench bridge={bridge} />);
