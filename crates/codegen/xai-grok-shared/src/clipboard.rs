@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Cross-platform system clipboard access.
 //!
 //! On macOS, delegates to `pbcopy`/`pbpaste` subprocesses instead of linking

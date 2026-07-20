@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Shared startup terminal-probe primitive: write a query, and (OSC 11
 //! only) raw-fd poll/read stdin until a terminator or deadline.
 //! XTVERSION uses only `write_query`;

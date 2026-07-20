@@ -1,3 +1,4 @@
+// Modified by the AgentDesk project for Windows desktop integration and safety support.
 //! Lightweight process-spawning utilities for TTY safety.
 //!
 //! When a TUI/pager/raw-mode terminal owns the parent process's controlling
