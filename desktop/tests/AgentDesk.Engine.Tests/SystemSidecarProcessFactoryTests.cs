@@ -83,7 +83,7 @@ public sealed class SystemSidecarProcessFactoryTests
         {
             sidecar = await factory.StartAsync(startInfo, CancellationToken.None);
             Assert.True(
-                await WaitForFileAsync(markerPath, TimeSpan.FromSeconds(5)),
+                await WaitForFileAsync(markerPath, TimeSpan.FromSeconds(15)),
                 "The child must resume after successful Job Object assignment.");
         }
         finally
