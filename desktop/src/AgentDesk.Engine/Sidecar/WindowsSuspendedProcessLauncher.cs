@@ -427,20 +427,34 @@ internal sealed class WindowsSuspendedProcessLauncher
 
         public void Kill(bool entireProcessTree) => _process.Kill(entireProcessTree);
 
-        public ValueTask DisposeAsync()
+        public async ValueTask DisposeAsync()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0)
             {
-                return ValueTask.CompletedTask;
+                return;
             }
 
             _process.Exited -= OnExited;
-            _jobObject.Dispose();
-            _standardInput.Dispose();
-            _standardOutput.Dispose();
-            _standardError.Dispose();
-            _process.Dispose();
-            return ValueTask.CompletedTask;
+            try
+            {
+                _jobObject.Dispose();
+                using var timeout = new CancellationTokenSource(
+                    TimeSpan.FromMilliseconds(WaitTimeoutMilliseconds));
+                try
+                {
+                    await _process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+                {
+                }
+            }
+            finally
+            {
+                _standardInput.Dispose();
+                _standardOutput.Dispose();
+                _standardError.Dispose();
+                _process.Dispose();
+            }
         }
 
         private void OnExited(object? sender, EventArgs args)

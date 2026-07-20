@@ -300,6 +300,86 @@ public sealed class SystemSidecarProcessFactoryTests
     }
 
     [Fact]
+    public async Task DisposeAsync_WaitsForTheRootProcessAfterClosingTheJob()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var jobClosed = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var jobApi = new RecordingWindowsJobObjectApi();
+        jobApi.JobObject.Released = () => jobClosed.TrySetResult();
+        var factory = new SystemSidecarProcessFactory(jobApi);
+        var sidecar = await factory.StartAsync(
+            CreateSleepingProcessStartInfo(),
+            CancellationToken.None);
+        using var child = Process.GetProcessById(jobApi.AssignedProcessId!.Value);
+
+        try
+        {
+            var disposeTask = sidecar.DisposeAsync().AsTask();
+            await jobClosed.Task.WaitAsync(TimeSpan.FromSeconds(1));
+
+            Assert.False(
+                disposeTask.IsCompleted,
+                "Disposal must not return while the root process is still exiting after Job closure.");
+
+            child.Kill(entireProcessTree: true);
+            await child.WaitForExitAsync();
+            await disposeTask.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            if (!child.HasExited)
+            {
+                child.Kill(entireProcessTree: true);
+                await child.WaitForExitAsync();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task DisposeAsync_StopsWaitingWhenTheRootProcessDoesNotExit()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var jobApi = new RecordingWindowsJobObjectApi();
+        var factory = new SystemSidecarProcessFactory(jobApi);
+        var sidecar = await factory.StartAsync(
+            CreateSleepingProcessStartInfo(),
+            CancellationToken.None);
+        using var child = Process.GetProcessById(jobApi.AssignedProcessId!.Value);
+        var stopwatch = Stopwatch.StartNew();
+
+        try
+        {
+            await sidecar.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(8));
+
+            Assert.InRange(
+                stopwatch.Elapsed,
+                TimeSpan.FromSeconds(4),
+                TimeSpan.FromSeconds(8));
+            Assert.False(
+                child.HasExited,
+                "The fake Job deliberately leaves the root process running to exercise the timeout.");
+        }
+        finally
+        {
+            stopwatch.Stop();
+            if (!child.HasExited)
+            {
+                child.Kill(entireProcessTree: true);
+                await child.WaitForExitAsync();
+            }
+        }
+    }
+
+    [Fact]
     public async Task StartAsync_RemovesInheritedCredentialVariablesFromTheChild()
     {
         const string genericSecretName = "AGENTDESK_TEST_API_KEY";
@@ -494,6 +574,12 @@ public sealed class SystemSidecarProcessFactoryTests
 
         public override bool IsInvalid => false;
 
-        protected override bool ReleaseHandle() => true;
+        public Action? Released { get; set; }
+
+        protected override bool ReleaseHandle()
+        {
+            Released?.Invoke();
+            return true;
+        }
     }
 }

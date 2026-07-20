@@ -76,7 +76,28 @@ public sealed class ProcessJobLauncherTests
 
             grandchild?.Dispose();
             ownershipPipe.Dispose();
-            Directory.Delete(testRoot, recursive: true);
+            await DeleteDirectoryWithRetryAsync(testRoot, TimeSpan.FromSeconds(5));
+        }
+    }
+
+    private static async Task DeleteDirectoryWithRetryAsync(string path, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (true)
+        {
+            try
+            {
+                Directory.Delete(path, recursive: true);
+                return;
+            }
+            catch (IOException) when (DateTime.UtcNow < deadline)
+            {
+            }
+            catch (UnauthorizedAccessException) when (DateTime.UtcNow < deadline)
+            {
+            }
+
+            await Task.Delay(25);
         }
     }
 
