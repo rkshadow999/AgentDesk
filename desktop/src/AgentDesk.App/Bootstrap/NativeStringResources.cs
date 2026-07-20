@@ -15,5 +15,8 @@ internal sealed class NativeStringResources
     }
 
     public string Get(string name) =>
-        _resourceMap.GetValue(name, _resourceContext).ValueAsString;
+        _resourceMap.GetValue(NormalizeLookupName(name), _resourceContext).ValueAsString;
+
+    internal static string NormalizeLookupName(string name) =>
+        name.Replace('.', '/');
 }
