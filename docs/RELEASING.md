@@ -16,6 +16,8 @@ The repository must be public and use `main` as its default protected branch. En
 
 Require pull requests, successful AgentDesk CI checks, resolved conversations, and protection from force pushes/deletion on `main`. Restrict tag/release creation to maintainers. Use a protected GitHub Environment for release signing when available and require reviewer approval.
 
+The optional packaged WebView2 gate must not use a persistent runner or an ordinary workstation. Provision a clean disposable x64 VM from a trusted snapshot for one reviewed non-PR job, then start a JIT/ephemeral self-hosted runner in the foreground of its logged-in interactive Windows session. Give it the standard `self-hosted`, `Windows`, and `X64` labels plus `agentdesk-interactive`; never install it as a Windows service. Use a dedicated non-administrator local account with no personal/signing credentials, SSH agents, network shares, reusable disks, or internal-network access, and destroy the VM and registration immediately afterward. Keep `AGENTDESK_RUN_INTERACTIVE_GUI_SMOKE` false unless every control is present. The checked-in non-PR condition is defense in depth, not isolation from a public repository whose workflows can be modified; inspect queued jobs before registering the runner and restrict its runner group to this workflow where supported. Hosted x64/ARM64 jobs continue to run the CDP helper suite, package dependency closure, and artifact upload when this optional job is disabled. If the variable is enabled, `github-release` waits for this gate and does not publish after a failure; a deliberately skipped optional gate remains non-blocking.
+
 Repository secrets required for tag packaging:
 
 - `AGENTDESK_MSIX_PFX_BASE64`: Base64 of the code-signing PFX.

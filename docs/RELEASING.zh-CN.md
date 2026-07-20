@@ -16,6 +16,8 @@
 
 `main` 应要求 Pull Request、AgentDesk CI 成功、对话已解决，并禁止 force push/删除。只允许维护者创建 tag/release。条件允许时使用受保护 GitHub Environment 保存发布签名 secret，并要求 reviewer 批准。
 
+可选的打包后 WebView2 门禁不得使用长期在线的 runner 或普通开发机。请从可信快照创建只执行一次已审查非 PR 任务的干净 x64 一次性 VM，并在其已登录 Windows 用户的前台交互会话中启动 JIT/ephemeral 自托管 runner。除标准 `self-hosted`、`Windows`、`X64` 标签外，还要添加 `agentdesk-interactive`；不得把它安装为 Windows 服务。必须使用专用非管理员本地账户，不得包含个人/签名凭据、SSH Agent、网络共享、可复用磁盘或内网访问，并在任务后立即销毁 VM 与注册。无法满足全部控制时，`AGENTDESK_RUN_INTERACTIVE_GUI_SMOKE` 必须保持为 `false`。仓库中的非 PR 条件只是纵深防护，并不能隔离可修改 workflow 的公开仓库；注册 runner 前要检查排队任务，GitHub 套餐支持时还应把 runner group 限定为此 workflow。即使未启用该可选 Job，托管 x64/ARM64 Job 仍会运行 CDP helper 测试、打包依赖闭包与产物上传。启用变量后，`github-release` 会等待此门禁，失败时不得发布；主动跳过的可选门禁则不阻断发布。
+
 Tag 打包需要以下仓库 Secret：
 
 - `AGENTDESK_MSIX_PFX_BASE64`：代码签名 PFX 的 Base64。

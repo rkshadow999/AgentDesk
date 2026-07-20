@@ -469,33 +469,6 @@ jobs:
           }
           ./scripts/agentdesk/Build-AgentDeskPackage.ps1 @parameters
 
-      - name: Smoke-test packaged WebView2 surfaces over CDP
-        shell: pwsh
-        run: |
-          $portableApp = Join-Path $PWD "artifacts/agentdesk/package-input-${{ matrix.architecture }}/portable/AgentDesk.App.exe"
-          if (-not (Test-Path -LiteralPath $portableApp -PathType Leaf)) {
-            throw "The ${{ matrix.architecture }} portable AgentDesk.App.exe was not produced for the WebView2 CDP smoke test."
-          }
-          $launcherOutput = Join-Path $PWD "artifacts/agentdesk/cdp-launcher-${{ matrix.architecture }}"
-          dotnet publish ./desktop/tools/AgentDesk.ProcessJobLauncher/AgentDesk.ProcessJobLauncher.csproj `
-            --configuration Release `
-            --runtime "${{ matrix.runtime }}" `
-            --self-contained true `
-            --output $launcherOutput `
-            -p:PublishSingleFile=true `
-            -p:IncludeNativeLibrariesForSelfExtract=true `
-            -p:DebugSymbols=false `
-            -p:DebugType=None
-          if ($LASTEXITCODE -ne 0) { throw "The WebView2 Job Object launcher publish failed." }
-          $jobLauncher = Join-Path $launcherOutput "AgentDesk.ProcessJobLauncher.exe"
-          if (-not (Test-Path -LiteralPath $jobLauncher -PathType Leaf)) {
-            throw "The ${{ matrix.architecture }} WebView2 Job Object launcher was not produced."
-          }
-          node ./scripts/agentdesk/Test-AgentDeskWebViewCdp.mjs `
-            --launcher $jobLauncher `
-            --executable $portableApp `
-            --timeout-ms 90000
-
       - name: Remove signing certificate
         if: always()
         shell: pwsh
@@ -549,6 +522,63 @@ jobs:
           path: artifacts/agentdesk/package-input-${{ matrix.architecture }}
           if-no-files-found: error
           retention-days: 7
+
+  interactive-gui-smoke:
+    name: Interactive Windows x64 WebView2 smoke
+    # GitHub-hosted Windows sessions cannot provide a reliable interactive GUI boundary.
+    # Public-repository conditions and labels are defense in depth, not runner isolation.
+    # Register only a clean disposable one-job interactive VM with no credentials or internal access.
+    # https://github.com/actions/runner-images/issues/14049
+    if: github.event_name != 'pull_request' && vars.AGENTDESK_RUN_INTERACTIVE_GUI_SMOKE == 'true'
+    needs: windows-build
+    runs-on: [self-hosted, Windows, X64, agentdesk-interactive]
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download x64 package input
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: AgentDesk-package-input-x64
+          path: artifacts/input
+
+      - name: Set up Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Smoke-test packaged WebView2 surfaces over CDP
+        shell: pwsh
+        run: |
+          $portableApp = Join-Path $PWD "artifacts/input/portable/AgentDesk.App.exe"
+          if (-not (Test-Path -LiteralPath $portableApp -PathType Leaf)) {
+            throw "The x64 portable AgentDesk.App.exe was not downloaded for the WebView2 CDP smoke test."
+          }
+          $launcherOutput = Join-Path $PWD "artifacts/cdp-launcher-x64"
+          dotnet publish ./desktop/tools/AgentDesk.ProcessJobLauncher/AgentDesk.ProcessJobLauncher.csproj `
+            --configuration Release `
+            --runtime win-x64 `
+            --self-contained true `
+            --output $launcherOutput `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:DebugSymbols=false `
+            -p:DebugType=None
+          if ($LASTEXITCODE -ne 0) { throw "The WebView2 Job Object launcher publish failed." }
+          $jobLauncher = Join-Path $launcherOutput "AgentDesk.ProcessJobLauncher.exe"
+          if (-not (Test-Path -LiteralPath $jobLauncher -PathType Leaf)) {
+            throw "The x64 WebView2 Job Object launcher was not produced."
+          }
+          node ./scripts/agentdesk/Test-AgentDeskWebViewCdp.mjs `
+            --launcher $jobLauncher `
+            --executable $portableApp `
+            --timeout-ms 90000
 
   assemble-release:
     name: Assemble ${{ matrix.architecture }} release
@@ -615,12 +645,13 @@ jobs:
 
   github-release:
     name: Publish tag release
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    if: github.event_name == 'push' && github.ref_type == 'tag' && always() && !failure() && !cancelled()
     needs:
       - linux-sidecar
       - assemble-release
       - cloud-tests
       - cloud-maintenance
+      - interactive-gui-smoke
     runs-on: windows-2025
     timeout-minutes: 360
     permissions:

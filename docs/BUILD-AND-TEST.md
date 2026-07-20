@@ -159,11 +159,16 @@ The package script supports a no-write validation path:
 | `linux-sidecar` | Ubuntu 22.04 x64/ARM64 | Rust contract and enforced sandbox tests, real strict sidecar health fail-closed probe, ELF/GLIBC check, Linux SBOM and checksum |
 | `cloud-tests` | Ubuntu 24.04 | Release-configuration Cloud server integration suite |
 | `cloud-maintenance` | Windows 2025 | Real-process offline database backup/restore/rollback E2E, including lease refusal and failed-restore automatic rollback |
-| `windows-build` | Windows 2025 x64 / Windows 11 ARM | Web tests/build, every desktop test project (including Cloud client/updater/provider-smoke tests), Rust contract/lifecycle, native and WSL package inputs, signing gates |
+| `windows-build` | Windows 2025 x64 / Windows 11 ARM | Web tests/build, WebView2 CDP helper tests on both architectures, every desktop test project (including Cloud client/updater/provider-smoke tests), Rust contract/lifecycle, native and WSL package inputs, signing gates, dependency closure, and package-input upload |
+| `interactive-gui-smoke` | Opt-in interactive self-hosted Windows x64 | Downloads the packaged x64 Portable input and launches both WebView2 surfaces through the bounded CDP/Job Object harness |
 | `assemble-release` | Ubuntu 24.04 | Portable zip, standalone updater, MSIX, SPDX/CycloneDX companions, signing status, update manifests/signatures, SHA-256 list |
 | `github-release` | Windows 2025, tag only | Current/previous MSIX Authenticode/publisher re-verification, signed artifact publication, and rollback bundle |
 
-CI configuration is evidence only after it runs successfully for the exact commit. A locally green x64 suite is not ARM64 evidence, and an unsigned branch artifact is not a signed release.
+GitHub-hosted Windows sessions do not provide a reliable interactive GUI boundary, so they run the CDP helper tests and all non-GUI package gates but do not launch the packaged WinUI application. The public repository must never use a persistent self-hosted runner or an ordinary developer workstation for this gap. To enable the real packaged GUI gate, provision a clean disposable x64 VM from a trusted snapshot for one reviewed non-PR run, start a JIT/ephemeral runner in the logged-in foreground interactive session, and label it `self-hosted`, `Windows`, `X64`, and `agentdesk-interactive`. Run it under a dedicated non-administrator local account with no personal or signing credentials, SSH agents, network shares, reusable disks, or access to internal networks; destroy the VM and runner registration after the job. Do not install it as a Windows service. Keep `AGENTDESK_RUN_INTERACTIVE_GUI_SMOKE` false unless all of these controls are in place.
+
+The checked-in job excludes `pull_request` events as defense in depth, but a modifiable workflow condition and custom label are not a security boundary for a public repository. Review queued jobs before registering the disposable runner and use a runner group restricted to this workflow where the GitHub plan supports it. When the repository variable is enabled, a failure blocks Tag publication; when disabled, the skipped optional job does not block the hosted package pipeline.
+
+CI configuration is evidence only after it runs successfully for the exact commit. A hosted helper result or interactive x64 run is not ARM64 real-device evidence, and an unsigned branch artifact is not a signed release.
 
 ## Recorded Local Evidence
 

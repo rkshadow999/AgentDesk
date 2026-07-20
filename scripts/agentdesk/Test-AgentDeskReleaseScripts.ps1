@@ -52,6 +52,71 @@ function Write-Utf8NoBom {
     [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
 }
 
+function Test-WorkflowScalarField {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][int]$Indent,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Value
+    )
+
+    $line = "{0}{1}: {2}" -f (" " * $Indent), $Name, $Value
+    return [System.Text.RegularExpressions.Regex]::IsMatch(
+        $Source,
+        '(?m)^' + [System.Text.RegularExpressions.Regex]::Escape($line) + '\r?$')
+}
+
+function Get-WorkflowListFieldItems {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][int]$Indent,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    $fieldLine = "{0}{1}:" -f (" " * $Indent), $Name
+    $itemPrefix = "{0}- " -f (" " * ($Indent + 2))
+    $block = [System.Text.RegularExpressions.Regex]::Match(
+        $Source,
+        '(?ms)^' +
+            [System.Text.RegularExpressions.Regex]::Escape($fieldLine) +
+            '\r?\n(?<items>(?:^' +
+            [System.Text.RegularExpressions.Regex]::Escape($itemPrefix) +
+            '[^\r\n]+\r?\n?)+)')
+    if (-not $block.Success) {
+        return @()
+    }
+
+    return @([System.Text.RegularExpressions.Regex]::Matches(
+        $block.Groups["items"].Value,
+        '(?m)^' +
+            [System.Text.RegularExpressions.Regex]::Escape($itemPrefix) +
+            '(?<value>[^\r\n]+)\r?$') | ForEach-Object {
+            $_.Groups["value"].Value
+        })
+}
+
+$interactiveGuiCondition =
+    "github.event_name != 'pull_request' && vars.AGENTDESK_RUN_INTERACTIVE_GUI_SMOKE == 'true'"
+foreach ($unsafeInteractiveCondition in @(
+    "$interactiveGuiCondition || true",
+    "$interactiveGuiCondition # bypass"
+)) {
+    if (Test-WorkflowScalarField `
+            -Source "    if: $unsafeInteractiveCondition" `
+            -Indent 4 `
+            -Name "if" `
+            -Value $interactiveGuiCondition) {
+        throw "The workflow scalar matcher accepted an unsafe interactive GUI condition."
+    }
+}
+$commentOnlyNeeds = "    needs:`n      # - interactive-gui-smoke`n"
+if ((Get-WorkflowListFieldItems `
+        -Source $commentOnlyNeeds `
+        -Indent 4 `
+        -Name "needs") -contains "interactive-gui-smoke") {
+    throw "The workflow list matcher accepted a comment-only dependency."
+}
+
 function Get-DryRunOutput {
     param(
         [Parameter(Mandatory)][string]$Version,
@@ -934,7 +999,7 @@ if ($linuxJobSource.Contains("continue-on-error: true")) {
 
 $windowsJob = [System.Text.RegularExpressions.Regex]::Match(
     $workflowSource,
-    '(?ms)^  windows-build:\r?\n(?<body>.*?)(?=^  assemble-release:)')
+    '(?ms)^  windows-build:\r?\n(?<body>.*?)(?=^  [a-zA-Z0-9_-]+:)')
 if (-not $windowsJob.Success) {
     throw "The AgentDesk workflow must define a windows-build job."
 }
@@ -1001,26 +1066,100 @@ if (-not $windowsJobSource.Contains($dotnetFormatCommand)) {
     throw "The Windows build job must run '$dotnetFormatCommand'."
 }
 
-$packagedCdpStep = [System.Text.RegularExpressions.Regex]::Match(
+$webViewCdpHelperStep = [System.Text.RegularExpressions.Regex]::Match(
     $windowsJobSource,
-    '(?ms)^      - name: Smoke-test packaged WebView2 surfaces over CDP\r?\n(?<body>.*?)(?=^      - name:)')
+    '(?ms)^      - name: Test WebView2 CDP smoke helpers\r?\n(?<body>.*?)(?=^      - name:|\z)')
+if (-not $webViewCdpHelperStep.Success) {
+    throw "The Windows build job must test the WebView2 CDP smoke helpers."
+}
+$webViewCdpHelperStepSource = $webViewCdpHelperStep.Groups["body"].Value
+if (-not $webViewCdpHelperStepSource.Contains(
+        "node ./scripts/agentdesk/Test-AgentDeskWebViewCdp.test.mjs") -or
+    [System.Text.RegularExpressions.Regex]::IsMatch(
+        $webViewCdpHelperStepSource,
+        '(?m)^        if:')) {
+    throw "The WebView2 CDP helper tests must run on both hosted Windows architectures."
+}
+
+if ($windowsJobSource.Contains("Test-AgentDeskWebViewCdp.mjs")) {
+    throw "GitHub-hosted Windows build jobs must not run interactive WebView2 CDP tests."
+}
+
+$interactiveGuiJob = [System.Text.RegularExpressions.Regex]::Match(
+    $workflowSource,
+    '(?ms)^  interactive-gui-smoke:\r?\n(?<body>.*?)(?=^  [a-zA-Z0-9_-]+:)')
+if (-not $interactiveGuiJob.Success) {
+    throw "The AgentDesk workflow must define an opt-in interactive GUI smoke job."
+}
+$interactiveGuiJobSource = $interactiveGuiJob.Groups["body"].Value
+if (-not (Test-WorkflowScalarField `
+        -Source $interactiveGuiJobSource `
+        -Indent 4 `
+        -Name "if" `
+        -Value $interactiveGuiCondition)) {
+    throw "The interactive GUI smoke job must use the exact non-PR opt-in condition."
+}
+foreach ($requiredInteractiveScalar in @(
+    @{ Name = "needs"; Value = "windows-build" },
+    @{ Name = "runs-on"; Value = "[self-hosted, Windows, X64, agentdesk-interactive]" }
+)) {
+    if (-not (Test-WorkflowScalarField `
+            -Source $interactiveGuiJobSource `
+            -Indent 4 `
+            -Name $requiredInteractiveScalar.Name `
+            -Value $requiredInteractiveScalar.Value)) {
+        throw "The interactive GUI smoke job must set '$($requiredInteractiveScalar.Name)' to '$($requiredInteractiveScalar.Value)'."
+    }
+}
+foreach ($requiredInteractiveJobSource in @(
+    "https://github.com/actions/runner-images/issues/14049",
+    "Public-repository conditions and labels are defense in depth, not runner isolation.",
+    "Register only a clean disposable one-job interactive VM",
+    "name: AgentDesk-package-input-x64",
+    "path: artifacts/input"
+)) {
+    if (-not $interactiveGuiJobSource.Contains($requiredInteractiveJobSource)) {
+        throw "The interactive GUI smoke job is missing '$requiredInteractiveJobSource'."
+    }
+}
+
+$packagedCdpStep = [System.Text.RegularExpressions.Regex]::Match(
+    $interactiveGuiJobSource,
+    '(?ms)^      - name: Smoke-test packaged WebView2 surfaces over CDP\r?\n(?<body>.*?)(?=^      - name:|\z)')
 if (-not $packagedCdpStep.Success) {
-    throw "The Windows build job must smoke-test packaged WebView2 surfaces over CDP."
+    throw "The interactive GUI job must smoke-test packaged WebView2 surfaces over CDP."
 }
 $packagedCdpStepSource = $packagedCdpStep.Groups["body"].Value
-if ($packagedCdpStepSource.Contains("matrix.architecture == 'x64'")) {
-    throw "The packaged WebView2 CDP smoke must run on both native Windows matrix architectures."
-}
 foreach ($requiredPackagedCdpSource in @(
-    'package-input-${{ matrix.architecture }}/portable/AgentDesk.App.exe',
+    'artifacts/input/portable/AgentDesk.App.exe',
     'dotnet publish ./desktop/tools/AgentDesk.ProcessJobLauncher/AgentDesk.ProcessJobLauncher.csproj',
-    'cdp-launcher-${{ matrix.architecture }}',
+    '--runtime win-x64',
+    'artifacts/cdp-launcher-x64',
     'AgentDesk.ProcessJobLauncher.exe',
     'node ./scripts/agentdesk/Test-AgentDeskWebViewCdp.mjs',
     '--launcher $jobLauncher'
 )) {
     if (-not $packagedCdpStepSource.Contains($requiredPackagedCdpSource)) {
         throw "The packaged WebView2 CDP smoke is missing '$requiredPackagedCdpSource'."
+    }
+}
+
+foreach ($unconditionalWindowsStepName in @(
+    "Verify packaged dependency closure",
+    "Upload package inputs"
+)) {
+    $unconditionalWindowsStep = [System.Text.RegularExpressions.Regex]::Match(
+        $windowsJobSource,
+        '(?ms)^      - name: ' +
+            [System.Text.RegularExpressions.Regex]::Escape($unconditionalWindowsStepName) +
+            '\r?\n(?<body>.*?)(?=^      - name:|\z)')
+    if (-not $unconditionalWindowsStep.Success) {
+        throw "The Windows build job is missing '$unconditionalWindowsStepName'."
+    }
+    if ([System.Text.RegularExpressions.Regex]::IsMatch(
+            $unconditionalWindowsStep.Groups["body"].Value,
+            '(?m)^        if:')) {
+        throw "The Windows step '$unconditionalWindowsStepName' must run for both package architectures."
     }
 }
 
@@ -1092,17 +1231,33 @@ foreach ($requiredCloudMaintenanceSource in @(
 $releaseJob = [System.Text.RegularExpressions.Regex]::Match(
     $workflowSource,
     '(?ms)^  github-release:\r?\n(?<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\z)')
-if (-not $releaseJob.Success -or
-    -not $releaseJob.Groups["body"].Value.Contains("- cloud-tests")) {
-    throw "Tag publication must wait for the self-hosted cloud integration tests."
-}
-if (-not $releaseJob.Groups["body"].Value.Contains("- cloud-maintenance")) {
-    throw "Tag publication must wait for the Cloud database maintenance E2E job."
+if (-not $releaseJob.Success) {
+    throw "The AgentDesk workflow must define a GitHub Release publication job."
 }
 $releaseJobSource = $releaseJob.Groups["body"].Value
-if (-not $releaseJobSource.Contains(
-        "if: github.event_name == 'push' && github.ref_type == 'tag'")) {
-    throw "Versioned GitHub Release publication must be limited to push-triggered tags."
+$releaseNeeds = Get-WorkflowListFieldItems `
+    -Source $releaseJobSource `
+    -Indent 4 `
+    -Name "needs"
+foreach ($requiredReleaseNeed in @(
+    "linux-sidecar",
+    "assemble-release",
+    "cloud-tests",
+    "cloud-maintenance",
+    "interactive-gui-smoke"
+)) {
+    if ($releaseNeeds -notcontains $requiredReleaseNeed) {
+        throw "Tag publication must wait for '$requiredReleaseNeed'."
+    }
+}
+$releasePublicationCondition =
+    "github.event_name == 'push' && github.ref_type == 'tag' && always() && !failure() && !cancelled()"
+if (-not (Test-WorkflowScalarField `
+        -Source $releaseJobSource `
+        -Indent 4 `
+        -Name "if" `
+        -Value $releasePublicationCondition)) {
+    throw "Versioned GitHub Release publication must be tag-only, accept a skipped optional GUI gate, and stop on failed dependencies."
 }
 if ($releaseJobSource.Contains("--clobber")) {
     throw "Published GitHub Release assets must be immutable; --clobber is forbidden."

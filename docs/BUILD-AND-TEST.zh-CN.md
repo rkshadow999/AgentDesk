@@ -159,11 +159,16 @@ git diff --check
 | `linux-sidecar` | Ubuntu 22.04 x64/ARM64 | Rust 契约与强制沙箱测试、真实 strict sidecar health fail-closed 探测、ELF/GLIBC 检查、Linux SBOM 与校验和 |
 | `cloud-tests` | Ubuntu 24.04 | Release 配置 Cloud Server 集成测试集 |
 | `cloud-maintenance` | Windows 2025 | 真实进程停机数据库备份/恢复/回滚 E2E，包括 lease 拒绝与失败恢复自动回滚 |
-| `windows-build` | Windows 2025 x64 / Windows 11 ARM | Web 测试/构建、全部桌面测试项目（含 Cloud Client/更新器/Provider smoke 测试）、Rust 契约/生命周期、本机与 WSL 包输入、签名门禁 |
+| `windows-build` | Windows 2025 x64 / Windows 11 ARM | Web 测试/构建、两种架构上的 WebView2 CDP helper 测试、全部桌面测试项目（含 Cloud Client/更新器/Provider smoke 测试）、Rust 契约/生命周期、本机与 WSL 包输入、签名门禁、依赖闭包与包输入上传 |
+| `interactive-gui-smoke` | 可选的交互式自托管 Windows x64 | 下载已打包的 x64 Portable 输入，并通过受限 CDP/Job Object 测试工具启动两个 WebView2 界面 |
 | `assemble-release` | Ubuntu 24.04 | Portable zip、独立更新器、MSIX、SPDX/CycloneDX 配套文件、签名状态、更新 manifest/signature、SHA-256 清单 |
 | `github-release` | Windows 2025，仅 Tag | 当前/上一 MSIX Authenticode/Publisher 重新验证、签名产物发布和回滚包 |
 
-只有 workflow 针对准确提交成功运行后，CI 配置才构成证据。本地 x64 测试通过不是 ARM64 证据，未签名分支产物也不是签名发布。
+GitHub 托管 Windows 会话不能提供可靠的交互式 GUI 边界，因此它们会运行 CDP helper 测试与全部非 GUI 打包门禁，但不会启动已打包的 WinUI 应用。公开仓库不得使用长期在线的自托管 runner 或普通开发机来补这个缺口。若要启用真实打包 GUI 门禁，请从可信快照创建只执行一次已审查非 PR 任务的干净 x64 一次性 VM，在已登录用户的前台交互会话中启动 JIT/ephemeral runner，并添加 `self-hosted`、`Windows`、`X64` 与 `agentdesk-interactive` 标签。Runner 必须使用专用的非管理员本地账户，不得含个人或签名凭据、SSH Agent、网络共享、可复用磁盘或内网访问；任务结束后销毁 VM 与 runner 注册。不得把它安装为 Windows 服务。无法满足全部控制时，`AGENTDESK_RUN_INTERACTIVE_GUI_SMOKE` 必须保持为 `false`。
+
+仓库中的 Job 会排除 `pull_request` 事件作为纵深防护，但可被修改的 workflow 条件和自定义标签并不是公开仓库的安全隔离边界。注册一次性 runner 前必须检查排队任务；GitHub 套餐支持时，还应使用仅允许此 workflow 的 runner group。启用仓库变量后，测试失败会阻止 Tag 发布；未启用时，跳过这个可选 Job 不会阻断托管打包流水线。
+
+只有 workflow 针对准确提交成功运行后，CI 配置才构成证据。托管 helper 结果或交互式 x64 运行都不是真实 ARM64 设备证据，未签名分支产物也不是签名发布。
 
 ## 已记录的本地证据
 
