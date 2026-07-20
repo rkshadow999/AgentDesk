@@ -13,6 +13,8 @@
   <data name="NativeProtected.Text" xml:space="preserve"><value>本机兼容（非沙箱）</value></data>
   <data name="WorkbenchAutomationName" xml:space="preserve"><value>AgentDesk 工作台</value></data>
   <data name="InspectorAutomationName" xml:space="preserve"><value>AgentDesk 检查器</value></data>
+  <data name="InspectorSplitter.AutomationProperties.Name" xml:space="preserve"><value>调整检查器宽度</value></data>
+  <data name="InspectorSplitter.AutomationProperties.HelpText" xml:space="preserve"><value>使用左右方向键调整宽度，按 Enter 或空格键恢复默认宽度。</value></data>
   <data name="Reload" xml:space="preserve"><value>重新加载</value></data>
   <data name="WorkspaceNotSelected" xml:space="preserve"><value>未选择工作区</value></data>
   <data name="DesktopStartFailed" xml:space="preserve"><value>无法启动桌面界面：{0}</value></data>
@@ -54,6 +56,10 @@
   <data name="CloudPairingFiles" xml:space="preserve"><value>AgentDesk 恢复密钥配对包</value></data>
   <data name="CloudConfirm" xml:space="preserve"><value>继续</value></data>
   <data name="CloudCancel" xml:space="preserve"><value>取消</value></data>
+  <data name="FullAccessApprovalTitle" xml:space="preserve"><value>启用完全访问？</value></data>
+  <data name="FullAccessApprovalWarning" xml:space="preserve"><value>完全访问会以当前 Windows 用户权限自动批准 ACP 工具请求，包括执行命令。工具无需再次提示即可读取或修改文件并使用网络。这不是沙箱，也不限制工具只能访问当前工作区。请仅在你接受这些风险时启用。</value></data>
+  <data name="FullAccessApprovalEnable" xml:space="preserve"><value>启用完全访问</value></data>
+  <data name="FullAccessApprovalCancel" xml:space="preserve"><value>取消</value></data>
   <data name="ExtensionApprovalTitle" xml:space="preserve"><value>允许扩展操作？</value></data>
   <data name="ExtensionApprovalBody" xml:space="preserve"><value>类型：{0}&#x0A;操作：{1}&#x0A;目标：{2}&#x0A;&#x0A;此操作会修改本地扩展配置或加载代码。仅在你主动发起并信任目标时允许。</value></data>
   <data name="ExtensionApprovalAllowOnce" xml:space="preserve"><value>仅允许一次</value></data>

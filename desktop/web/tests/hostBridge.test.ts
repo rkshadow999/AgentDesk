@@ -2891,7 +2891,9 @@ describe("createHostBridge", () => {
       executionProfile: "WslStrict",
       notificationsEnabled: true,
       windowsAutomationEnabled: true,
-      backgroundUpdateChecksEnabled: true
+      backgroundUpdateChecksEnabled: true,
+      fullAccessEnabled: true,
+      fontScalePercent: 125
     });
 
     expect(postMessage).toHaveBeenNthCalledWith(1, {
@@ -2928,7 +2930,9 @@ describe("createHostBridge", () => {
       executionProfile: "WslStrict",
       notificationsEnabled: true,
       windowsAutomationEnabled: true,
-      backgroundUpdateChecksEnabled: true
+      backgroundUpdateChecksEnabled: true,
+      fullAccessEnabled: true,
+      fontScalePercent: 125
     });
   });
 
@@ -3004,6 +3008,8 @@ describe("createHostBridge", () => {
         notificationsEnabled: true,
         windowsAutomationEnabled: true,
         backgroundUpdateChecksEnabled: true,
+        fullAccessEnabled: true,
+        fontScalePercent: 125,
         restartRequired: true
       }
     ]) {
@@ -3041,9 +3047,33 @@ describe("createHostBridge", () => {
         notificationsEnabled: true,
         windowsAutomationEnabled: true,
         backgroundUpdateChecksEnabled: true,
+        fullAccessEnabled: true,
+        fontScalePercent: 125,
         restartRequired: true
       }
     ]);
+  });
+
+  it("rejects unsupported authoritative font scales", () => {
+    const { bridge, emit, received } = hostEventHarness();
+    bridge.subscribe(() => undefined);
+
+    emit({
+      schemaVersion: 1,
+      type: "ui/preferences/changed",
+      language: "zh-CN",
+      composerDraft: "",
+      sessionMode: "default",
+      executionProfile: "NativeProtected",
+      notificationsEnabled: false,
+      windowsAutomationEnabled: false,
+      backgroundUpdateChecksEnabled: false,
+      fullAccessEnabled: false,
+      fontScalePercent: 105,
+      restartRequired: false
+    });
+
+    expect(received).toHaveLength(0);
   });
 
   it("correlates Windows Automation terminals and rejects duplicates or echoed values", () => {

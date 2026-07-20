@@ -4553,6 +4553,8 @@ describe("Workbench", () => {
         notificationsEnabled: true,
         windowsAutomationEnabled: true,
         backgroundUpdateChecksEnabled: false,
+        fullAccessEnabled: false,
+        fontScalePercent: 110,
         restartRequired: false
       });
       bridge.emit({
@@ -4588,10 +4590,105 @@ describe("Workbench", () => {
       executionProfile: "WslStrict",
       notificationsEnabled: true,
       windowsAutomationEnabled: true,
-      backgroundUpdateChecksEnabled: false
+      backgroundUpdateChecksEnabled: false,
+      fullAccessEnabled: false,
+      fontScalePercent: 110
     }));
     expect(screen.getByPlaceholderText("向 AgentDesk 描述任务")).toBeInTheDocument();
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("applies font scale immediately and follows authoritative full access rollback", async () => {
+    const bridge = new RecordingBridge();
+    render(<Workbench bridge={bridge} />);
+    act(() => bridge.emit({
+      type: "ui/preferences/changed",
+      language: "zh-CN",
+      composerDraft: "",
+      sessionMode: "default",
+      executionProfile: "NativeProtected",
+      notificationsEnabled: false,
+      windowsAutomationEnabled: false,
+      backgroundUpdateChecksEnabled: false,
+      fullAccessEnabled: false,
+      fontScalePercent: 110,
+      restartRequired: false
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: zhCn.settings }));
+    const fontScale = screen.getByLabelText(zhCn.fontScale);
+    const fullAccess = screen.getByRole("checkbox", { name: zhCn.fullAccessEnabled });
+    fireEvent.change(fontScale, { target: { value: "125" } });
+    fireEvent.click(fullAccess);
+
+    expect(document.documentElement.style.fontSize).toBe("12.5px");
+    expect(screen.getByText(zhCn.fullAccessActive)).toBeInTheDocument();
+    await waitFor(() => expect(bridge.commands).toContainEqual(expect.objectContaining({
+      type: "ui/preferences/save",
+      fullAccessEnabled: true,
+      fontScalePercent: 125
+    })));
+
+    act(() => bridge.emit({
+      type: "ui/preferences/changed",
+      language: "zh-CN",
+      composerDraft: "",
+      sessionMode: "default",
+      executionProfile: "NativeProtected",
+      notificationsEnabled: false,
+      windowsAutomationEnabled: false,
+      backgroundUpdateChecksEnabled: false,
+      fullAccessEnabled: false,
+      fontScalePercent: 100,
+      restartRequired: false
+    }));
+
+    expect(fontScale).toHaveValue("100");
+    expect(fullAccess).not.toBeChecked();
+    expect(document.documentElement.style.fontSize).toBe("10px");
+    expect(screen.queryByText(zhCn.fullAccessActive)).not.toBeInTheDocument();
+  });
+
+  it("keeps the composing textarea mounted while an authoritative font scale arrives", () => {
+    const bridge = new RecordingBridge();
+    render(<Workbench bridge={bridge} />);
+    act(() => bridge.emit({
+      type: "ui/preferences/changed",
+      language: "zh-CN",
+      composerDraft: "",
+      sessionMode: "default",
+      executionProfile: "NativeProtected",
+      notificationsEnabled: false,
+      windowsAutomationEnabled: false,
+      backgroundUpdateChecksEnabled: false,
+      fullAccessEnabled: false,
+      fontScalePercent: 110,
+      restartRequired: false
+    }));
+    const composer = screen.getByPlaceholderText(zhCn.promptPlaceholder);
+    composer.focus();
+    fireEvent.compositionStart(composer);
+    fireEvent.change(composer, { target: { value: "中文输入" } });
+
+    act(() => bridge.emit({
+      type: "ui/preferences/changed",
+      language: "zh-CN",
+      composerDraft: "中文输入",
+      sessionMode: "default",
+      executionProfile: "NativeProtected",
+      notificationsEnabled: false,
+      windowsAutomationEnabled: false,
+      backgroundUpdateChecksEnabled: false,
+      fullAccessEnabled: false,
+      fontScalePercent: 140,
+      restartRequired: false
+    }));
+
+    expect(screen.getByPlaceholderText(zhCn.promptPlaceholder)).toBe(composer);
+    expect(composer).toHaveFocus();
+    expect(composer).toHaveValue("中文输入");
+    expect(document.documentElement.style.fontSize).toBe("14px");
+    fireEvent.compositionEnd(composer);
   });
 
   it("requires host-approved Windows Automation and clears set-value input", async () => {
@@ -4607,6 +4704,8 @@ describe("Workbench", () => {
       notificationsEnabled: false,
       windowsAutomationEnabled: false,
       backgroundUpdateChecksEnabled: false,
+      fullAccessEnabled: false,
+      fontScalePercent: 110,
       restartRequired: false
     }));
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
@@ -4651,6 +4750,8 @@ describe("Workbench", () => {
       notificationsEnabled: true,
       windowsAutomationEnabled: true,
       backgroundUpdateChecksEnabled: false,
+      fullAccessEnabled: false,
+      fontScalePercent: 110,
       restartRequired: false
     }));
     fireEvent.change(screen.getByLabelText("Windows UI 自动化操作"), {
@@ -4702,6 +4803,8 @@ describe("Workbench", () => {
       notificationsEnabled: true,
       windowsAutomationEnabled: false,
       backgroundUpdateChecksEnabled: false,
+      fullAccessEnabled: false,
+      fontScalePercent: 110,
       restartRequired: false
     }));
     expect(screen.getByRole("checkbox", { name: "启用 Windows UI 自动化" })).not.toBeChecked();

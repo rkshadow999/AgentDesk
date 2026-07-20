@@ -39,6 +39,10 @@ Tag 使用 `v<版本>`。接受的版本为：
 
 其他后缀、build metadata、四段输入版本、前导零编号或超过 MSIX 区间的编号会被 `Build-AgentDeskPackage.ps1` 拒绝。Tag 带且只带一个前导 `v`，但直接传给打包脚本的 `-Version` 值必须省略它。稳定版映射到 MSIX revision `65535`，高于同一三段版本的预发布包；发布顺序为 `ci < alpha < beta < preview < rc < stable`。
 
+### Legacy Tag 迁移
+
+仓库中存在一个历史预发布 Tag `0.1.0-alpha.5`，它没有当前要求的 `v` 前缀。发布历史解析会接受这种 legacy 写法用于时间线和版本顺序检查，因此后续的 `v` Tag 不会被误判为首个发布。legacy Tag 永远不能作为回滚目标：它没有当前回滚契约要求的双架构、已签名 MSIX 和已签名更新 manifest 证据。如果存在 legacy 历史但没有更低版本的 `v` 前缀签名发布，Tag workflow 会 fail-closed，并且不会生成 `NO-PREVIOUS-ROLLBACK.txt`；请先发布或恢复一个兼容的签名版本，再重试。
+
 ## 发布前检查
 
 在准备进入 `main` 的干净提交上运行：

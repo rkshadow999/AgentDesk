@@ -31,6 +31,8 @@ describe("InspectorSurface", () => {
       notificationsEnabled: false,
       windowsAutomationEnabled: false,
       backgroundUpdateChecksEnabled: false,
+      fullAccessEnabled: false,
+      fontScalePercent: 110,
       restartRequired: false
     }));
 
@@ -39,6 +41,41 @@ describe("InspectorSurface", () => {
     expect(screen.getByRole("tab", { name: "Terminal" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Plan" })).toBeInTheDocument();
     expect(screen.getByText("No changes to review")).toBeInTheDocument();
+  });
+
+  it("updates both inspector typography engines without remounting them", async () => {
+    const bridge = new RecordingBridge();
+    const runtime = new RecordingRuntime();
+    render(<InspectorSurface bridge={bridge} runtime={runtime} />);
+
+    act(() => bridge.emit(sessionUpdate("diff_review", {
+      sessionUpdate: "diff_review",
+      content: [{ type: "diff", path: "src/App.cs", oldText: "old", newText: "new" }]
+    })));
+    fireEvent.click(screen.getByRole("tab", { name: "终端" }));
+    await waitFor(() => expect(runtime.mountTerminal).toHaveBeenCalledTimes(1));
+
+    act(() => bridge.emit({
+      type: "ui/preferences/changed",
+      language: "zh-CN",
+      composerDraft: "",
+      sessionMode: "default",
+      executionProfile: "NativeProtected",
+      notificationsEnabled: false,
+      windowsAutomationEnabled: false,
+      backgroundUpdateChecksEnabled: false,
+      fullAccessEnabled: false,
+      fontScalePercent: 140,
+      restartRequired: false
+    }));
+
+    expect(document.documentElement.style.fontSize).toBe("14px");
+    expect(runtime.diffViewer.setFontSize).toHaveBeenCalledWith(16.8);
+    expect(runtime.diffViewer.layout).toHaveBeenCalled();
+    expect(runtime.terminalViewer.setFontSize).toHaveBeenCalledWith(16.8);
+    expect(runtime.terminalViewer.fit).toHaveBeenCalled();
+    expect(runtime.mountDiff).toHaveBeenCalledTimes(1);
+    expect(runtime.mountTerminal).toHaveBeenCalledTimes(1);
   });
 
   it("moves between inspector tabs with the keyboard", () => {
@@ -337,6 +374,7 @@ describe("InspectorSurface", () => {
 class RecordingRuntime implements InspectorRuntime {
   readonly diffViewer: DiffViewer = {
     setDiff: vi.fn(),
+    setFontSize: vi.fn(),
     layout: vi.fn(),
     dispose: vi.fn()
   };
@@ -344,6 +382,7 @@ class RecordingRuntime implements InspectorRuntime {
   readonly terminalViewer: TerminalViewer = {
     appendText: vi.fn(() => true),
     replaceText: vi.fn(),
+    setFontSize: vi.fn(),
     fit: vi.fn(),
     dispose: vi.fn()
   };
@@ -379,6 +418,7 @@ class DeferredTerminalRuntime implements InspectorRuntime {
 
   mountDiff = vi.fn(async () => ({
     setDiff: vi.fn(),
+    setFontSize: vi.fn(),
     layout: vi.fn(),
     dispose: vi.fn()
   }));
@@ -398,6 +438,7 @@ function recordingTerminalViewer(): TerminalViewer {
   return {
     appendText: vi.fn(() => true),
     replaceText: vi.fn(),
+    setFontSize: vi.fn(),
     fit: vi.fn(),
     dispose: vi.fn()
   };

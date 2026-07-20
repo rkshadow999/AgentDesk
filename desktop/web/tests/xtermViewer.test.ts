@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const xterm = vi.hoisted(() => ({
   writeCallbacksSynchronously: false,
+  fit: vi.fn(),
   instances: [] as Array<{
     options: Record<string, unknown>;
     writes: Array<{ text: string; callback?: () => void }>;
@@ -36,7 +37,7 @@ vi.mock("@xterm/xterm", () => ({
 
 vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class {
-    fit() {}
+    fit() { xterm.fit(); }
   }
 }));
 
@@ -48,12 +49,26 @@ describe("xterm viewer", () => {
   beforeEach(() => {
     xterm.instances.length = 0;
     xterm.writeCallbacksSynchronously = false;
+    xterm.fit.mockClear();
     frames = [];
     vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
       frames.push(callback);
       return frames.length;
     }));
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
+  });
+
+  it("updates the terminal font size and refits without recreating it", () => {
+    const viewer = mountXtermViewer(document.createElement("div"), 13.2);
+    const terminal = xterm.instances[0];
+    const initialFitCount = xterm.fit.mock.calls.length;
+
+    viewer.setFontSize(16.8);
+    viewer.fit();
+
+    expect(terminal.options.fontSize).toBe(16.8);
+    expect(xterm.instances).toHaveLength(1);
+    expect(xterm.fit).toHaveBeenCalledTimes(initialFitCount + 1);
   });
 
   it("batches raw appends in one frame without resetting the terminal", () => {

@@ -75,9 +75,11 @@ Get-AuthenticodeSignature -LiteralPath .\AgentDesk-0.1.0-alpha.2-win-x64.msix |
 2. 打开 Provider 设置，确认 Base URL、模型和 API backend（`chat_completions` 或 `responses`）。
 3. 输入 API Key。Key 存入 Windows 凭据管理器，并与当前 Base URL 绑定；修改 Base URL 后必须重新输入 Key。
 4. 优先使用 HTTPS。除非明确开启不安全传输选项，否则 AgentDesk 会阻止向明文 HTTP 发送凭据。开启后，任何能够观察或修改连接的人都可能获得 Key 与任务内容。
-5. 在授权前阅读本机执行警告和每一项权限请求。
+5. 在授权前阅读本机执行警告和每一项权限请求。除非你明确接受以当前 Windows 用户权限自动批准 ACP 工具请求，否则请保持**完全访问**关闭。
 
 默认语言为简体中文，可在设置中选择 English；Web 标签立即切换，原生 WinUI 文本在重启后切换。只有引擎声明支持时才会开放图片提示。扩展与 Marketplace 操作使用和 sidecar 相同的用户权限，因此必须检查来源和确认对话框；签名或目录条目不等于沙箱。远程 Cloud Profile 下，AgentDesk 会阻止所有 Plugin 变更和可能重建或重载注册表的 Marketplace install/update/uninstall 操作，而不会信任 Web UI 提供的发布者 ID。只读目录列表/刷新仍可使用。
+
+设置还提供五档界面字体和可拖拽检查器分隔条，两项选择都会保存在 `%LOCALAPPDATA%\AgentDesk`。开启“完全访问”前必须完成一次原生确认；开启后，宿主会为 ACP 引擎工具请求（包括命令执行）自动选择引擎提供的单次允许选项。它不是工作区边界：工具仍拥有当前 Windows 用户的文件系统与网络权限。关闭后恢复逐次审批，而插件安装、凭据、恢复、明文传输和 Windows Automation 仍分别使用独立安全提示。
 
 Worktree 创建/应用/移除/GC 会改变 Git 状态和文件。请核对来源/目标，在可用时先用 dry-run，并在 overwrite 或清理前保留备份。Windows 通知默认关闭，只包含通用任务状态；点击通知时通过 session ID 查找会话，不会在激活参数中携带工作区路径。
 

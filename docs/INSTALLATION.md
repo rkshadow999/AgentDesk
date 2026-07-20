@@ -75,9 +75,11 @@ Do not run directly from inside the zip or merge a new version over a running Po
 2. Open provider settings and confirm the Base URL, model, and API backend (`chat_completions` or `responses`).
 3. Enter the API key. The key is stored in Windows Credential Manager and is bound to the configured Base URL. Changing the Base URL requires entering the key again.
 4. Prefer HTTPS. AgentDesk blocks sending a credential to plaintext HTTP unless the insecure-transport option is explicitly enabled. That option exposes the key and task content to anyone able to observe or alter the connection.
-5. Review the native-execution warning and every permission request before approval.
+5. Review the native-execution warning and every permission request before approval. Leave **Full Access** disabled unless you deliberately accept automatic ACP tool approvals under your Windows user account.
 
 Simplified Chinese is the default. English can be selected in Settings; Web labels change immediately and native WinUI text changes after restart. Image prompts are enabled only when the engine advertises the capability. Extension and Marketplace actions execute with the same user authority as the sidecar, so inspect their source and confirmation dialogs; a signature or catalog entry is not a sandbox. In a remote Cloud profile, AgentDesk blocks every Plugin mutation and Marketplace install/update/uninstall action that can rebuild or reload the registry rather than trusting a publisher ID supplied by the Web UI. Read-only catalog list/refresh remains available.
+
+Settings also provides five interface font sizes and a draggable inspector divider; both choices persist in `%LOCALAPPDATA%\AgentDesk`. Enabling Full Access requires one native confirmation. Once enabled, the host automatically selects an advertised one-time allow option for ACP engine tool requests, including command execution. It is not a workspace boundary: those tools retain the current Windows user's filesystem and network authority. Disabling it restores interactive approvals, while extension installation, credentials, restore, insecure transport, and Windows Automation continue to use independent safety prompts.
 
 Worktree create/apply/remove/GC actions can change Git state and files. Review the selected source/destination, use dry-run where offered, and keep backups before overwrite or cleanup operations. Windows notifications are disabled by default and contain only generic task status; notification activation resolves a session by ID rather than carrying a workspace path.
 

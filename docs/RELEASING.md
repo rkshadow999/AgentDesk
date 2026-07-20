@@ -39,6 +39,10 @@ Tags use `v<version>`. Accepted versions are:
 
 Other suffixes, build metadata, four-part input versions, leading-zero sequence numbers, or sequences above the configured MSIX range are rejected by `Build-AgentDeskPackage.ps1`. Tags carry exactly one leading `v`, but direct `-Version` values passed to the package script must omit it. Stable builds map to MSIX revision `65535`, above prereleases of the same three-part version; release ordering is `ci < alpha < beta < preview < rc < stable`.
 
+### Legacy tag migration
+
+The repository contains a historical prerelease tagged `0.1.0-alpha.5` without the required `v` prefix. Release history parsing accepts this legacy spelling for chronology and out-of-order checks, so a later `v` tag is not treated as the first published release. A legacy tag is never eligible as a rollback target: it does not provide the dual-architecture, signed MSIX, and signed update-manifest evidence required by the current rollback contract. If legacy history exists but no lower `v`-prefixed signed release is available, the tag workflow fails closed and does not emit `NO-PREVIOUS-ROLLBACK.txt`; publish or restore a compatible signed release before retrying.
+
 ## Preflight
 
 From a clean commit intended for `main`:

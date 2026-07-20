@@ -182,7 +182,9 @@ public sealed class WebMessageProtocolTests
                   "executionProfile": "WslStrict",
                   "notificationsEnabled": true,
                   "windowsAutomationEnabled": true,
-                  "backgroundUpdateChecksEnabled": true
+                  "backgroundUpdateChecksEnabled": true,
+                  "fullAccessEnabled": true,
+                  "fontScalePercent": 125
                 }
                 """));
         Assert.Equal("en-US", preferences.Preferences.Language);
@@ -192,6 +194,8 @@ public sealed class WebMessageProtocolTests
         Assert.True(preferences.Preferences.NotificationsEnabled);
         Assert.True(preferences.Preferences.WindowsAutomationEnabled);
         Assert.True(preferences.Preferences.BackgroundUpdateChecksEnabled);
+        Assert.True(preferences.Preferences.FullAccessEnabled);
+        Assert.Equal(125, preferences.Preferences.FontScalePercent);
     }
 
     [Fact]
@@ -1207,7 +1211,9 @@ public sealed class WebMessageProtocolTests
             ExecutionProfile.WslStrict,
             NotificationsEnabled: true,
             WindowsAutomationEnabled: true,
-            BackgroundUpdateChecksEnabled: true);
+            BackgroundUpdateChecksEnabled: true,
+            FullAccessEnabled: true,
+            FontScalePercent: 140);
 
         var json = WebMessageProtocol.SerializeEvent(
             new UiPreferencesChangedWebEvent(preferences));
@@ -1218,6 +1224,8 @@ public sealed class WebMessageProtocolTests
         Assert.True(root.GetProperty("notificationsEnabled").GetBoolean());
         Assert.True(root.GetProperty("windowsAutomationEnabled").GetBoolean());
         Assert.True(root.GetProperty("backgroundUpdateChecksEnabled").GetBoolean());
+        Assert.True(root.GetProperty("fullAccessEnabled").GetBoolean());
+        Assert.Equal(140, root.GetProperty("fontScalePercent").GetInt32());
     }
 
     [Fact]

@@ -1543,6 +1543,36 @@ public sealed class AgentDeskHostControllerTests
     }
 
     [Fact]
+    public async Task Preferences_FullAccessRequiresNativeApprovalAndUsesTheAuthoritativeResult()
+    {
+        var fixture = new ControllerFixture();
+        var approvals = new Queue<bool>([false, true]);
+        var approvalCount = 0;
+        fixture.FullAccessApprovalHandler = _ =>
+        {
+            approvalCount++;
+            return Task.FromResult(approvals.Dequeue());
+        };
+        await using var controller = fixture.CreateController();
+
+        await controller.HandleAsync(new SaveUiPreferencesWebCommand(
+            UiPreferences.Default with { FullAccessEnabled = true }));
+
+        Assert.False(fixture.UiPreferences.Preferences.FullAccessEnabled);
+        Assert.False(Assert.IsType<UiPreferencesChangedWebEvent>(
+            fixture.Events.Snapshot().Last()).Preferences.FullAccessEnabled);
+
+        await controller.HandleAsync(new SaveUiPreferencesWebCommand(
+            UiPreferences.Default with { FullAccessEnabled = true, FontScalePercent = 125 }));
+        await controller.HandleAsync(new SaveUiPreferencesWebCommand(
+            fixture.UiPreferences.Preferences with { NotificationsEnabled = true }));
+
+        Assert.True(fixture.UiPreferences.Preferences.FullAccessEnabled);
+        Assert.Equal(125, fixture.UiPreferences.Preferences.FontScalePercent);
+        Assert.Equal(2, approvalCount);
+    }
+
+    [Fact]
     public async Task InitialWorkspace_RejectsZeroGenerationAcknowledgement()
     {
         var fixture = new ControllerFixture();
@@ -5055,6 +5085,131 @@ public sealed class AgentDeskHostControllerTests
     }
 
     [Fact]
+    public async Task PermissionRequest_FullAccessSelectsAllowOnceWithoutPublishingAnApproval()
+    {
+        var fixture = new ControllerFixture();
+        fixture.Credentials.Save("xai", "xai-test-key");
+        fixture.UiPreferences.Preferences = UiPreferences.Default with { FullAccessEnabled = true };
+        var engine = fixture.Factory.EnqueueEngine("C:\\workspace", "session-1");
+        await using var controller = fixture.CreateController();
+        await controller.HandleAsync(new PromptWebCommand("done", ExecutionProfile.NativeProtected));
+        fixture.Events.Clear();
+
+        engine.EmitPermission(CreatePermissionRequest("permission-auto", "session-1"));
+        await engine.WaitForPermissionResponseAsync("permission-auto");
+
+        Assert.Contains(
+            ("permission-auto", PermissionDecision.Selected("allow-once")),
+            engine.PermissionResponses);
+        Assert.DoesNotContain(
+            fixture.Events.Snapshot(),
+            webEvent => webEvent is PermissionRequestedWebEvent or
+                EngineStatusWebEvent { Status: "error" });
+    }
+
+    [Fact]
+    public async Task PermissionRequest_FullAccessFallsBackWhenAllowOnceIsUnavailable()
+    {
+        var fixture = new ControllerFixture();
+        fixture.Credentials.Save("xai", "xai-test-key");
+        fixture.UiPreferences.Preferences = UiPreferences.Default with { FullAccessEnabled = true };
+        var engine = fixture.Factory.EnqueueEngine("C:\\workspace", "session-1");
+        await using var controller = fixture.CreateController();
+        await controller.HandleAsync(new PromptWebCommand("done", ExecutionProfile.NativeProtected));
+        fixture.Events.Clear();
+        var request = new PermissionRequest(
+            "permission-no-allow",
+            new SessionId("session-1"),
+            "tool-1",
+            "运行命令",
+            [new PermissionOption("reject-once", "拒绝", PermissionOptionKind.RejectOnce)],
+            [],
+            toolKind: "execute");
+
+        engine.EmitPermission(request);
+
+        var projected = await fixture.Events.WaitForAsync<PermissionRequestedWebEvent>(
+            item => item.RequestId == request.RequestId,
+            TimeSpan.FromSeconds(5));
+        Assert.Equal(request.RequestId, projected.RequestId);
+        Assert.Empty(engine.PermissionResponses);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PermissionRequest_FullAccessResponseFailureFallsBackWithoutEngineError(
+        bool throwException)
+    {
+        var fixture = new ControllerFixture();
+        fixture.Credentials.Save("xai", "xai-test-key");
+        fixture.UiPreferences.Preferences = UiPreferences.Default with { FullAccessEnabled = true };
+        var engine = fixture.Factory.EnqueueEngine("C:\\workspace", "session-1");
+        engine.PermissionResponseHandler = throwException
+            ? (_, _, _) => Task.FromException<bool>(new IOException("response failed"))
+            : (_, _, _) => Task.FromResult(false);
+        await using var controller = fixture.CreateController();
+        await controller.HandleAsync(new PromptWebCommand("done", ExecutionProfile.NativeProtected));
+        fixture.Events.Clear();
+
+        engine.EmitPermission(CreatePermissionRequest("permission-fallback", "session-1"));
+
+        _ = await fixture.Events.WaitForAsync<PermissionRequestedWebEvent>(
+            item => item.RequestId == "permission-fallback",
+            TimeSpan.FromSeconds(5));
+        Assert.DoesNotContain(
+            fixture.Events.Snapshot(),
+            item => item is EngineStatusWebEvent { Status: "error" });
+    }
+
+    [Fact]
+    public async Task PermissionRequest_FullAccessFailureAfterEngineSwitchCancelsTheStaleRequest()
+    {
+        var fixture = new ControllerFixture();
+        fixture.Credentials.Save("xai", "xai-test-key");
+        fixture.UiPreferences.Preferences = UiPreferences.Default with { FullAccessEnabled = true };
+        var oldEngine = fixture.Factory.EnqueueEngine("C:\\workspace", "old-session");
+        _ = fixture.Factory.EnqueueEngine("/mnt/c/workspace", "new-session");
+        var responseStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseResponse = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        oldEngine.PermissionResponseHandler = async (_, decision, _) =>
+        {
+            if (decision.Kind is PermissionDecisionKind.Selected)
+            {
+                responseStarted.TrySetResult();
+                return await releaseResponse.Task;
+            }
+            return true;
+        };
+        await using var controller = fixture.CreateController();
+        await controller.HandleAsync(new PromptWebCommand(
+            "native",
+            ExecutionProfile.NativeProtected));
+        fixture.Events.Clear();
+
+        oldEngine.EmitPermission(CreatePermissionRequest("permission-old", "old-session"));
+        await responseStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await controller.HandleAsync(new PromptWebCommand("wsl", ExecutionProfile.WslStrict));
+        releaseResponse.TrySetResult(false);
+        await oldEngine.WaitForPermissionResponseCountAsync("permission-old", expectedCount: 2);
+
+        Assert.Equal(
+            [
+                PermissionDecision.Selected("allow-once"),
+                PermissionDecision.Cancelled,
+            ],
+            oldEngine.PermissionResponses
+                .Where(response => response.RequestId == "permission-old")
+                .Select(response => response.Decision));
+        Assert.DoesNotContain(
+            fixture.Events.Snapshot(),
+            item => item is PermissionRequestedWebEvent { RequestId: "permission-old" } or
+                EngineStatusWebEvent { Status: "error" });
+    }
+
+    [Fact]
     public async Task ExtensionsList_ProjectsAllCatalogsWithoutSecretFields()
     {
         var fixture = new ControllerFixture();
@@ -6116,6 +6271,9 @@ public sealed class AgentDeskHostControllerTests
         public ExtensionApprovalHandler? ExtensionApprovalHandler { get; set; } =
             (_, _) => Task.FromResult(true);
 
+        public Func<CancellationToken, Task<bool>>? FullAccessApprovalHandler { get; set; } =
+            _ => Task.FromResult(true);
+
         public RecordingCredentialStore Credentials { get; } = new();
 
         public RecordingSidecarHostFactory Factory { get; } = new();
@@ -6143,7 +6301,8 @@ public sealed class AgentDeskHostControllerTests
                 UiPreferences,
                 Notifications,
                 ExtensionApprovalHandler,
-                CrashRecovery);
+                CrashRecovery,
+                FullAccessApprovalHandler);
             controller.EventProduced += (_, webEvent) => Events.Add(webEvent);
             return controller;
         }
@@ -6708,6 +6867,10 @@ public sealed class AgentDeskHostControllerTests
         public JsonElement LastUpdate { get; private set; }
 
         public Func<SessionId, string, CancellationToken, Task<PromptResult>>? PromptHandler { get; set; }
+
+        public Func<string, PermissionDecision, CancellationToken, Task<bool>>?
+            PermissionResponseHandler
+        { get; set; }
 
         public Func<string?, CancellationToken, Task<IReadOnlyList<RuntimeCommand>>>?
             ListRuntimeCommandsHandler
@@ -7422,7 +7585,8 @@ public sealed class AgentDeskHostControllerTests
         {
             PermissionResponses.Add((requestId, decision));
             _permissionResponseAdded.Release();
-            return Task.FromResult(true);
+            return PermissionResponseHandler?.Invoke(requestId, decision, cancellationToken) ??
+                Task.FromResult(true);
         }
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
@@ -7473,6 +7637,18 @@ public sealed class AgentDeskHostControllerTests
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             while (!PermissionResponses.Any(response => response.RequestId == requestId))
+            {
+                await _permissionResponseAdded.WaitAsync(timeout.Token);
+            }
+        }
+
+        public async Task WaitForPermissionResponseCountAsync(
+            string requestId,
+            int expectedCount)
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            while (PermissionResponses.Count(response => response.RequestId == requestId) <
+                expectedCount)
             {
                 await _permissionResponseAdded.WaitAsync(timeout.Token);
             }

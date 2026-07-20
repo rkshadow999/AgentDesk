@@ -14,19 +14,25 @@ using System.Globalization;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Microsoft.UI;
+using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.Web.WebView2.Core;
 using Windows.System;
 using Windows.Storage.Pickers;
+using Windows.UI.Core;
 
 namespace AgentDesk.App;
 
 public sealed partial class MainWindow : Window
 {
+    private static readonly TimeSpan WindowLayoutSaveDelay = TimeSpan.FromMilliseconds(250);
+
 #if DEBUG
     private const bool AllowDevelopmentWebAssetFallbacks = true;
 #else
@@ -53,7 +59,13 @@ public sealed partial class MainWindow : Window
     private readonly ContentDialogQueue _contentDialogQueue = new();
     private readonly HashSet<CoreWebView2> _loadedSurfaces = [];
     private readonly WebDocumentCommandGate _documentCommandGate = new();
+    private readonly InspectorPaneLayout _inspectorPaneLayout = new();
+    private readonly JsonWindowLayoutStore _windowLayoutStore = new();
+    private readonly object _windowLayoutSaveGate = new();
     private CoreWebView2Environment? _webViewEnvironment;
+    private CancellationTokenSource? _windowLayoutSaveCancellation;
+    private Task _windowLayoutSaveTask = Task.CompletedTask;
+    private bool _windowLayoutLoaded;
     private bool _isInitializing;
     private bool _isClosing;
     private bool _localResourcesDisposed;
@@ -68,7 +80,8 @@ public sealed partial class MainWindow : Window
         _hostController = new AgentDeskHostController(
             CreateHostOptions(launchOptions, cloudPolicyGate),
             notificationService,
-            RequestExtensionApprovalAsync);
+            RequestExtensionApprovalAsync,
+            RequestFullAccessApprovalAsync);
         var maintenanceRuntime = CreateMaintenanceRuntime(launchOptions);
         _updateCoordinator = maintenanceRuntime.UpdateCoordinator;
         _backgroundUpdateMonitor = new AgentDeskBackgroundUpdateMonitor(
@@ -567,12 +580,22 @@ public sealed partial class MainWindow : Window
     {
         AutomationProperties.SetName(WorkbenchWebView, Text("WorkbenchAutomationName"));
         AutomationProperties.SetName(InspectorWebView, Text("InspectorAutomationName"));
+        AutomationProperties.SetName(
+            InspectorSplitter,
+            Text("InspectorSplitter.AutomationProperties.Name"));
+        AutomationProperties.SetHelpText(
+            InspectorSplitter,
+            Text("InspectorSplitter.AutomationProperties.HelpText"));
         AutomationProperties.SetName(ReloadButton, Text("Reload"));
+        ToolTipService.SetToolTip(
+            InspectorSplitter,
+            Text("InspectorSplitter.AutomationProperties.HelpText"));
         ToolTipService.SetToolTip(ReloadButton, Text("Reload"));
     }
 
     private async void RootGrid_Loaded(object sender, RoutedEventArgs e)
     {
+        await LoadWindowLayoutAsync();
         if (_launchError is not null)
         {
             ShowError(_launchError);
@@ -580,6 +603,216 @@ public sealed partial class MainWindow : Window
         }
 
         await InitializeWorkbenchAsync();
+    }
+
+    private async Task LoadWindowLayoutAsync()
+    {
+        if (_windowLayoutLoaded)
+        {
+            return;
+        }
+
+        _windowLayoutLoaded = true;
+        WindowLayoutState state;
+        try
+        {
+            state = await _windowLayoutStore
+                .LoadAsync(_windowShutdown.Token)
+                .ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (_windowShutdown.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception)
+        {
+            state = WindowLayoutState.Default;
+        }
+
+        _inspectorPaneLayout.SetPreferredWidth(state.InspectorPaneWidth);
+        ApplyInspectorPaneWidth();
+    }
+
+    private void SurfaceGrid_SizeChanged(object sender, SizeChangedEventArgs e) =>
+        ApplyInspectorPaneWidth();
+
+    private void InspectorSplitter_DragStarted(object sender, DragStartedEventArgs e)
+    {
+        CancelPendingWindowLayoutSave();
+    }
+
+    private void InspectorSplitter_DragDelta(object sender, DragDeltaEventArgs e)
+    {
+        if (!InspectorSplitter.IsEnabled || !double.IsFinite(e.HorizontalChange))
+        {
+            return;
+        }
+
+        _inspectorPaneLayout.ResizeFromHorizontalDelta(e.HorizontalChange);
+        ApplyInspectorPaneWidth();
+    }
+
+    private void InspectorSplitter_DragCompleted(object sender, DragCompletedEventArgs e)
+    {
+        if (!e.Canceled)
+        {
+            ScheduleWindowLayoutSave();
+        }
+    }
+
+    private void InspectorSplitter_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (!InspectorSplitter.IsEnabled)
+        {
+            return;
+        }
+
+        if (e.Key is VirtualKey.Enter or VirtualKey.Space)
+        {
+            _inspectorPaneLayout.Reset();
+            ApplyInspectorPaneWidth();
+            ScheduleWindowLayoutSave();
+            e.Handled = true;
+            return;
+        }
+        if (e.Key is not (VirtualKey.Left or VirtualKey.Right))
+        {
+            return;
+        }
+
+        var shiftDown = (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift) &
+            CoreVirtualKeyStates.Down) != 0;
+        var step = shiftDown ? 64d : 16d;
+        var inspectorDelta = e.Key is VirtualKey.Left ? step : -step;
+        _inspectorPaneLayout.AdjustPreferredWidth(inspectorDelta);
+        ApplyInspectorPaneWidth();
+        ScheduleWindowLayoutSave();
+        e.Handled = true;
+    }
+
+    private void InspectorSplitter_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (!InspectorSplitter.IsEnabled)
+        {
+            return;
+        }
+
+        _inspectorPaneLayout.Reset();
+        ApplyInspectorPaneWidth();
+        ScheduleWindowLayoutSave();
+        e.Handled = true;
+    }
+
+    private void ApplyInspectorPaneWidth()
+    {
+        var surfaceWidth = SurfaceGrid.ActualWidth;
+        if (!double.IsFinite(surfaceWidth) || surfaceWidth <= 0)
+        {
+            return;
+        }
+
+        InspectorColumn.Width = new GridLength(
+            _inspectorPaneLayout.GetVisibleWidth(surfaceWidth));
+    }
+
+    private void ScheduleWindowLayoutSave()
+    {
+        if (_isClosing)
+        {
+            return;
+        }
+
+        var state = new WindowLayoutState(_inspectorPaneLayout.PreferredWidth).Normalize();
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_windowShutdown.Token);
+        CancellationTokenSource? previousCancellation;
+        lock (_windowLayoutSaveGate)
+        {
+            previousCancellation = _windowLayoutSaveCancellation;
+            _windowLayoutSaveCancellation = cancellation;
+            _windowLayoutSaveTask = SaveWindowLayoutAfterDelayAsync(state, cancellation);
+        }
+        TryCancel(previousCancellation);
+    }
+
+    private async Task SaveWindowLayoutAfterDelayAsync(
+        WindowLayoutState state,
+        CancellationTokenSource cancellation)
+    {
+        try
+        {
+            await Task.Delay(WindowLayoutSaveDelay, cancellation.Token).ConfigureAwait(false);
+            await _windowLayoutStore.SaveAsync(state, cancellation.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception)
+        {
+            // Window geometry persistence must not affect the engine or window lifecycle.
+        }
+        finally
+        {
+            lock (_windowLayoutSaveGate)
+            {
+                if (ReferenceEquals(_windowLayoutSaveCancellation, cancellation))
+                {
+                    _windowLayoutSaveCancellation = null;
+                }
+            }
+            cancellation.Dispose();
+        }
+    }
+
+    private void CancelPendingWindowLayoutSave()
+    {
+        CancellationTokenSource? cancellation;
+        lock (_windowLayoutSaveGate)
+        {
+            cancellation = _windowLayoutSaveCancellation;
+        }
+        TryCancel(cancellation);
+    }
+
+    private async Task FlushWindowLayoutAsync()
+    {
+        CancellationTokenSource? cancellation;
+        Task pendingSave;
+        lock (_windowLayoutSaveGate)
+        {
+            cancellation = _windowLayoutSaveCancellation;
+            pendingSave = _windowLayoutSaveTask;
+        }
+        TryCancel(cancellation);
+        try
+        {
+            await pendingSave.ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+        }
+
+        try
+        {
+            await _windowLayoutStore.SaveAsync(
+                    new WindowLayoutState(_inspectorPaneLayout.PreferredWidth),
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Best effort during shutdown; engine cleanup must continue.
+        }
+    }
+
+    private static void TryCancel(CancellationTokenSource? cancellation)
+    {
+        try
+        {
+            cancellation?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
     }
 
     private async void ReloadButton_Click(object sender, RoutedEventArgs e)
@@ -746,6 +979,7 @@ public sealed partial class MainWindow : Window
 
     private async ValueTask DisposeRuntimeAsync()
     {
+        await FlushWindowLayoutAsync().ConfigureAwait(false);
         await _backgroundUpdateMonitor.DisposeAsync().ConfigureAwait(false);
         await _hostController.DisposeAsync().ConfigureAwait(false);
         await _commandDispatcher.DisposeImageAttachmentsAsync().ConfigureAwait(false);
@@ -945,6 +1179,71 @@ public sealed partial class MainWindow : Window
 
     private Task PublishImageAttachmentEventAsync(WebEvent webEvent) =>
         RunOnUiThreadAsync(() => PostWebEvent(webEvent));
+
+    private Task<bool> RequestFullAccessApprovalAsync(CancellationToken cancellationToken)
+    {
+        if (DispatcherQueue.HasThreadAccess)
+        {
+            return _contentDialogQueue.EnqueueAsync(
+                ShowFullAccessApprovalAsync,
+                shutdownResult: false,
+                cancellationToken);
+        }
+
+        var completion = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!DispatcherQueue.TryEnqueue(async () =>
+            {
+                try
+                {
+                    completion.TrySetResult(
+                        await _contentDialogQueue.EnqueueAsync(
+                            ShowFullAccessApprovalAsync,
+                            shutdownResult: false,
+                            cancellationToken));
+                }
+                catch (Exception exception)
+                {
+                    completion.TrySetException(exception);
+                }
+            }))
+        {
+            completion.TrySetException(
+                new InvalidOperationException("The AgentDesk UI dispatcher is unavailable."));
+        }
+        return completion.Task;
+    }
+
+    private async Task<bool> ShowFullAccessApprovalAsync(
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_isClosing)
+        {
+            return false;
+        }
+
+        var content = new TextBlock
+        {
+            Text = Text("FullAccessApprovalWarning"),
+            TextWrapping = TextWrapping.Wrap,
+            MaxWidth = 480,
+        };
+        var dialog = new ContentDialog
+        {
+            XamlRoot = RootGrid.XamlRoot,
+            Title = Text("FullAccessApprovalTitle"),
+            Content = content,
+            PrimaryButtonText = Text("FullAccessApprovalEnable"),
+            CloseButtonText = Text("FullAccessApprovalCancel"),
+            DefaultButton = ContentDialogButton.Close,
+        };
+        using var registration = cancellationToken.Register(() =>
+            _ = DispatcherQueue.TryEnqueue(dialog.Hide));
+        var result = await dialog.ShowAsync();
+        cancellationToken.ThrowIfCancellationRequested();
+        return result is ContentDialogResult.Primary;
+    }
 
     private Task<bool> RequestExtensionApprovalAsync(
         ExtensionApprovalRequest request,
@@ -1217,6 +1516,7 @@ public sealed partial class MainWindow : Window
         InspectorWebView.Visibility = isOpen ? Visibility.Collapsed : Visibility.Visible;
         InspectorWebView.IsHitTestVisible = !isOpen;
         InspectorWebView.IsTabStop = !isOpen;
+        InspectorSplitter.IsEnabled = !isOpen;
         return Task.CompletedTask;
     }
 

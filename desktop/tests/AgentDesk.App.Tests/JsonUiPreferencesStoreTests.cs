@@ -24,17 +24,21 @@ public sealed class JsonUiPreferencesStoreTests : IDisposable
             ExecutionProfile.WslStrict,
             NotificationsEnabled: true,
             WindowsAutomationEnabled: true,
-            BackgroundUpdateChecksEnabled: true);
+            BackgroundUpdateChecksEnabled: true,
+            FullAccessEnabled: true,
+            FontScalePercent: 125);
 
         await store.SaveAsync(preferences);
         var loaded = await store.LoadAsync();
 
         Assert.Equal(preferences, loaded);
         using var document = JsonDocument.Parse(await File.ReadAllTextAsync(path));
-        Assert.Equal(3, document.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(4, document.RootElement.GetProperty("schemaVersion").GetInt32());
         Assert.True(document.RootElement.GetProperty("notificationsEnabled").GetBoolean());
         Assert.True(document.RootElement.GetProperty("windowsAutomationEnabled").GetBoolean());
         Assert.True(document.RootElement.GetProperty("backgroundUpdateChecksEnabled").GetBoolean());
+        Assert.True(document.RootElement.GetProperty("fullAccessEnabled").GetBoolean());
+        Assert.Equal(125, document.RootElement.GetProperty("fontScalePercent").GetInt32());
         Assert.DoesNotContain("secret", await File.ReadAllTextAsync(path), StringComparison.OrdinalIgnoreCase);
     }
 
@@ -60,6 +64,8 @@ public sealed class JsonUiPreferencesStoreTests : IDisposable
         Assert.False(loaded.NotificationsEnabled);
         Assert.False(loaded.WindowsAutomationEnabled);
         Assert.False(loaded.BackgroundUpdateChecksEnabled);
+        Assert.False(loaded.FullAccessEnabled);
+        Assert.Equal(110, loaded.FontScalePercent);
     }
 
     [Fact]
@@ -86,6 +92,47 @@ public sealed class JsonUiPreferencesStoreTests : IDisposable
         Assert.True(loaded.NotificationsEnabled);
         Assert.True(loaded.WindowsAutomationEnabled);
         Assert.False(loaded.BackgroundUpdateChecksEnabled);
+        Assert.False(loaded.FullAccessEnabled);
+        Assert.Equal(110, loaded.FontScalePercent);
+    }
+
+    [Fact]
+    public async Task Load_MigratesSchemaThreeWithFullAccessDisabledAndComfortableFonts()
+    {
+        Directory.CreateDirectory(_directory);
+        var path = Path.Combine(_directory, "ui-settings.json");
+        await File.WriteAllTextAsync(
+            path,
+            """
+            {
+              "schemaVersion": 3,
+              "language": "zh-CN",
+              "composerDraft": "",
+              "sessionMode": "default",
+              "executionProfile": "NativeProtected",
+              "notificationsEnabled": true,
+              "windowsAutomationEnabled": false,
+              "backgroundUpdateChecksEnabled": true
+            }
+            """);
+
+        var loaded = await new JsonUiPreferencesStore(path).LoadAsync();
+
+        Assert.True(loaded.BackgroundUpdateChecksEnabled);
+        Assert.False(loaded.FullAccessEnabled);
+        Assert.Equal(110, loaded.FontScalePercent);
+    }
+
+    [Theory]
+    [InlineData(89)]
+    [InlineData(105)]
+    [InlineData(141)]
+    public async Task Save_RejectsUnsupportedFontScales(int fontScalePercent)
+    {
+        var store = new JsonUiPreferencesStore(Path.Combine(_directory, "ui-settings.json"));
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            store.SaveAsync(UiPreferences.Default with { FontScalePercent = fontScalePercent }));
     }
 
     [Fact]

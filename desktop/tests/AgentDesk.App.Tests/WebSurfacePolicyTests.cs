@@ -231,6 +231,66 @@ public sealed class WebSurfacePolicyTests : IDisposable
     }
 
     [Fact]
+    public void MainWindow_DeclaresAnAccessibleResizableInspectorSurface()
+    {
+        XNamespace xaml = "http://schemas.microsoft.com/winfx/2006/xaml";
+        var document = XDocument.Load(FindMainWindowXaml());
+        var surfaceGrid = Assert.Single(
+            document.Descendants(),
+            element =>
+                element.Name.LocalName == "Grid" &&
+                (string?)element.Attribute(xaml + "Name") == "SurfaceGrid");
+        var columnDefinitions = Assert.Single(
+            surfaceGrid.Elements(),
+            element => element.Name.LocalName == "Grid.ColumnDefinitions");
+        var columns = columnDefinitions.Elements().ToArray();
+
+        Assert.Equal("SurfaceGrid_SizeChanged", (string?)surfaceGrid.Attribute("SizeChanged"));
+        Assert.Equal(3, columns.Length);
+        Assert.Equal("*", (string?)columns[0].Attribute("Width"));
+        Assert.Equal("8", (string?)columns[1].Attribute("Width"));
+        Assert.Equal("InspectorColumn", (string?)columns[2].Attribute(xaml + "Name"));
+        Assert.Equal("360", (string?)columns[2].Attribute("Width"));
+
+        var splitter = Assert.Single(
+            surfaceGrid.Elements(),
+            element =>
+                element.Name.LocalName == "Thumb" &&
+                (string?)element.Attribute(xaml + "Name") == "InspectorSplitter");
+        Assert.Equal("1", (string?)splitter.Attribute("Grid.Column"));
+        Assert.Equal("8", (string?)splitter.Attribute("Width"));
+        Assert.Equal("True", (string?)splitter.Attribute("IsTabStop"));
+        Assert.Equal(
+            "InspectorPaneSplitter",
+            (string?)splitter.Attribute("AutomationProperties.AutomationId"));
+        Assert.Equal("InspectorSplitter_DragStarted", (string?)splitter.Attribute("DragStarted"));
+        Assert.Equal("InspectorSplitter_DragDelta", (string?)splitter.Attribute("DragDelta"));
+        Assert.Equal(
+            "InspectorSplitter_DragCompleted",
+            (string?)splitter.Attribute("DragCompleted"));
+        Assert.Equal("InspectorSplitter_KeyDown", (string?)splitter.Attribute("KeyDown"));
+        Assert.Equal(
+            "InspectorSplitter_DoubleTapped",
+            (string?)splitter.Attribute("DoubleTapped"));
+
+        var workbench = Assert.Single(
+            surfaceGrid.Elements(),
+            element => (string?)element.Attribute(xaml + "Name") == "WorkbenchWebView");
+        var inspector = Assert.Single(
+            surfaceGrid.Elements(),
+            element => (string?)element.Attribute(xaml + "Name") == "InspectorWebView");
+        Assert.Equal("0", (string?)workbench.Attribute("Grid.Column"));
+        Assert.Equal("2", (string?)inspector.Attribute("Grid.Column"));
+
+        AssertWindowHandler("SurfaceGrid_SizeChanged", "SizeChangedEventArgs");
+        AssertWindowHandler("InspectorSplitter_DragStarted", "DragStartedEventArgs");
+        AssertWindowHandler("InspectorSplitter_DragDelta", "DragDeltaEventArgs");
+        AssertWindowHandler("InspectorSplitter_DragCompleted", "DragCompletedEventArgs");
+        AssertWindowHandler("InspectorSplitter_KeyDown", "KeyRoutedEventArgs");
+        AssertWindowHandler("InspectorSplitter_DoubleTapped", "DoubleTappedRoutedEventArgs");
+    }
+
+    [Fact]
     public void MainWindow_ErrorPanelDeclaresTheReloadControlAndHandler()
     {
         XNamespace xaml = "http://schemas.microsoft.com/winfx/2006/xaml";
@@ -295,6 +355,19 @@ public sealed class WebSurfacePolicyTests : IDisposable
         }
 
         throw new FileNotFoundException("Unable to locate MainWindow.xaml for the source contract test.");
+    }
+
+    private static void AssertWindowHandler(string name, string eventArgsTypeName)
+    {
+        var handler = typeof(MainWindow).GetMethod(
+            name,
+            BindingFlags.Instance | BindingFlags.NonPublic);
+
+        Assert.NotNull(handler);
+        Assert.Equal(typeof(void), handler.ReturnType);
+        Assert.Equal(2, handler.GetParameters().Length);
+        Assert.Equal(typeof(object), handler.GetParameters()[0].ParameterType);
+        Assert.Equal(eventArgsTypeName, handler.GetParameters()[1].ParameterType.Name);
     }
 
     private static void CreateDirectoryJunction(string link, string target)

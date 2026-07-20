@@ -10,7 +10,9 @@ public sealed record UiPreferences(
     ExecutionProfile ExecutionProfile,
     bool NotificationsEnabled = false,
     bool WindowsAutomationEnabled = false,
-    bool BackgroundUpdateChecksEnabled = false)
+    bool BackgroundUpdateChecksEnabled = false,
+    bool FullAccessEnabled = false,
+    int FontScalePercent = 110)
 {
     public const int MaximumComposerDraftLength = 64 * 1024;
 
@@ -21,7 +23,9 @@ public sealed record UiPreferences(
         ExecutionProfile.NativeProtected,
         NotificationsEnabled: false,
         WindowsAutomationEnabled: false,
-        BackgroundUpdateChecksEnabled: false);
+        BackgroundUpdateChecksEnabled: false,
+        FullAccessEnabled: false,
+        FontScalePercent: 110);
 
     public UiPreferences Validate()
     {
@@ -42,6 +46,12 @@ public sealed record UiPreferences(
             throw new ArgumentException(
                 "The execution profile is not supported.",
                 nameof(ExecutionProfile));
+        }
+        if (FontScalePercent is not (90 or 100 or 110 or 125 or 140))
+        {
+            throw new ArgumentException(
+                "The interface font scale is not supported.",
+                nameof(FontScalePercent));
         }
         return this;
     }

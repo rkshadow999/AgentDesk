@@ -13,6 +13,8 @@
   <data name="NativeProtected.Text" xml:space="preserve"><value>Native compatibility (not sandboxed)</value></data>
   <data name="WorkbenchAutomationName" xml:space="preserve"><value>AgentDesk workbench</value></data>
   <data name="InspectorAutomationName" xml:space="preserve"><value>AgentDesk inspector</value></data>
+  <data name="InspectorSplitter.AutomationProperties.Name" xml:space="preserve"><value>Resize inspector</value></data>
+  <data name="InspectorSplitter.AutomationProperties.HelpText" xml:space="preserve"><value>Use the Left and Right arrow keys to resize. Press Enter or Space to restore the default width.</value></data>
   <data name="Reload" xml:space="preserve"><value>Reload</value></data>
   <data name="WorkspaceNotSelected" xml:space="preserve"><value>No workspace selected</value></data>
   <data name="DesktopStartFailed" xml:space="preserve"><value>Could not start the desktop interface: {0}</value></data>
@@ -54,6 +56,10 @@
   <data name="CloudPairingFiles" xml:space="preserve"><value>AgentDesk recovery key pairing packages</value></data>
   <data name="CloudConfirm" xml:space="preserve"><value>Continue</value></data>
   <data name="CloudCancel" xml:space="preserve"><value>Cancel</value></data>
+  <data name="FullAccessApprovalTitle" xml:space="preserve"><value>Enable Full Access?</value></data>
+  <data name="FullAccessApprovalWarning" xml:space="preserve"><value>Full Access automatically approves ACP tool requests, including command execution, with your current Windows user permissions. Tools can read or change files and use the network without another prompt. This is not a sandbox or a workspace boundary. Enable it only if you accept these risks.</value></data>
+  <data name="FullAccessApprovalEnable" xml:space="preserve"><value>Enable Full Access</value></data>
+  <data name="FullAccessApprovalCancel" xml:space="preserve"><value>Cancel</value></data>
   <data name="ExtensionApprovalTitle" xml:space="preserve"><value>Allow extension operation?</value></data>
   <data name="ExtensionApprovalBody" xml:space="preserve"><value>Type: {0}&#x0A;Action: {1}&#x0A;Target: {2}&#x0A;&#x0A;This operation changes local extension configuration or loads code. Allow it only when you initiated the request and trust the target.</value></data>
   <data name="ExtensionApprovalAllowOnce" xml:space="preserve"><value>Allow once</value></data>

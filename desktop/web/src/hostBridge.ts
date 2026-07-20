@@ -1,3 +1,5 @@
+import { isFontScalePercent, type FontScalePercent } from "./fontScale";
+
 export const hostSchemaVersion = 1 as const;
 
 const maximumPendingHostRequests = 256;
@@ -427,6 +429,8 @@ export type HostCommand =
       notificationsEnabled: boolean;
       windowsAutomationEnabled: boolean;
       backgroundUpdateChecksEnabled: boolean;
+      fullAccessEnabled: boolean;
+      fontScalePercent: FontScalePercent;
     }
   | { type: "workspace/select" }
   | {
@@ -976,6 +980,8 @@ export type HostEvent =
       notificationsEnabled: boolean;
       windowsAutomationEnabled: boolean;
       backgroundUpdateChecksEnabled: boolean;
+      fullAccessEnabled: boolean;
+      fontScalePercent: FontScalePercent;
       restartRequired: boolean;
     }
   | {
@@ -3833,6 +3839,8 @@ function parseUiPreferencesChanged(value: Record<string, unknown>): HostEvent | 
     typeof value.notificationsEnabled === "boolean" &&
     typeof value.windowsAutomationEnabled === "boolean" &&
     typeof value.backgroundUpdateChecksEnabled === "boolean" &&
+    typeof value.fullAccessEnabled === "boolean" &&
+    isFontScalePercent(value.fontScalePercent) &&
     typeof value.restartRequired === "boolean"
     ? {
         type: "ui/preferences/changed",
@@ -3843,6 +3851,8 @@ function parseUiPreferencesChanged(value: Record<string, unknown>): HostEvent | 
         notificationsEnabled: value.notificationsEnabled,
         windowsAutomationEnabled: value.windowsAutomationEnabled,
         backgroundUpdateChecksEnabled: value.backgroundUpdateChecksEnabled,
+        fullAccessEnabled: value.fullAccessEnabled,
+        fontScalePercent: value.fontScalePercent,
         restartRequired: value.restartRequired
       }
     : null;
@@ -4624,7 +4634,8 @@ const hostEventKeys: Readonly<Record<string, readonly string[]>> = {
   "ui/preferences/changed": [
     "schemaVersion", "type", "language", "composerDraft", "sessionMode",
     "executionProfile", "notificationsEnabled", "windowsAutomationEnabled",
-    "backgroundUpdateChecksEnabled", "restartRequired"
+    "backgroundUpdateChecksEnabled", "fullAccessEnabled", "fontScalePercent",
+    "restartRequired"
   ],
   "session/exported": ["schemaVersion", "type", "requestId", "sessionId", "fileName"],
   "session/imported": [

@@ -13,10 +13,10 @@ AgentDesk is an independent, community-maintained Windows 11 desktop client buil
 
 - Native Windows 11 shell built with .NET 10, WinUI 3, and WebView2.
 - Rust agent runtime isolated as an ACP/NDJSON stdio sidecar rather than linked through private runtime APIs.
-- Simplified Chinese-first desktop UI with an English selector, workspace selection, task cancellation, Plan Mode, image attachments, and a searchable session center. Web labels switch immediately; native strings switch after restart.
+- Simplified Chinese-first desktop UI with an English selector, adjustable interface fonts, a persistent resizable inspector, workspace selection, task cancellation, Plan Mode, image attachments, and a searchable session center. Web labels switch immediately; native strings switch after restart.
 - API credentials stored through Windows Credential Manager and removed from the sidecar's inherited environment.
 - xAI and custom OpenAI-compatible Base URL/model/backend settings, including Responses API selection, with HTTPS by default and an explicit plaintext HTTP risk opt-in.
-- Explicit permission requests, a visible native-execution risk gate, and process-tree cleanup.
+- Explicit permission requests, a visible native-execution risk gate, process-tree cleanup, and an optional native-confirmed Full Access mode that automatically answers ACP tool approvals without disabling independent extension, credential, or Windows Automation gates.
 - Changes, terminal output, and plan inspection using Monaco and xterm.js surfaces; session fork, compact, rewind, rename, export/import, and reversible local archive operations.
 - An active-session Runtime Dashboard plus worktree create/list/inspect/apply/remove/GC workflows. Code review is a two-step flow: prepare and edit the review request, then explicitly start it through the standard prompt and permission path.
 - Bounded workspace file references, an `AGENTS.md` editor, and a capability-gated Memory browser with a 64 KiB UTF-8 limit and host-authoritative two-stage confirmation for writes and deletes.
@@ -36,6 +36,8 @@ The Alpha interface defaults to Simplified Chinese and provides an English selec
 Recorded local source-tree evidence is maintained in [Build and Test](docs/BUILD-AND-TEST.md) and is regenerated before publication. The public source repository is [rkshadow999/AgentDesk](https://github.com/rkshadow999/AgentDesk). Local verification is not evidence of a signed public MSIX, an ARM64 real-device launch, a usable `WslStrict` profile in a real WSL2 environment, or production Cloud/Runner readiness. Any MSIX built locally without the release certificate is an unsigned development artifact only.
 
 `NativeProtected` is retained as a protocol name for compatibility. In the UI it is labeled **Native compatibility (not sandboxed)**. It separates AgentDesk application data, removes inherited credential variables, keeps permission approval in the desktop host, and terminates the sidecar process tree. It still executes with the current Windows user's authority and does not confine filesystem or network access.
+
+Full Access is disabled by default and requires a native confirmation before it can be persisted. While enabled, the desktop automatically chooses an advertised one-time allow option for ACP engine tool requests. This is convenience, not isolation: commands still run with the current Windows user's authority and may modify files outside the selected workspace or access the network. Disabling Full Access restores interactive approvals immediately; extension installation, credentials, restore operations, insecure transport, and Windows Automation retain their separate confirmations.
 
 `WslStrict` requires the engine to attest an active strict sandbox and child-network restriction before authentication or session creation. The engine cannot yet prove that every helper, plugin, hook, PTY, and command launch path has the same child-network restriction, so it reports the attestation as incomplete. The desktop stops the sidecar instead of downgrading or continuing. See the [desktop safety details](desktop/README.md#execution-profiles).
 

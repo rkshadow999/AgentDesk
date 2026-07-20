@@ -83,8 +83,10 @@ public sealed partial class AgentDeskHostController :
     private readonly ICrashRecoveryStore _crashRecoveryStore;
     private readonly IUserNotificationService _notificationService;
     private readonly ExtensionApprovalHandler? _extensionApprovalHandler;
+    private readonly Func<CancellationToken, Task<bool>>? _fullAccessApprovalHandler;
     private readonly AgentDeskCloudPolicyGate _cloudPolicyGate;
     private readonly SemaphoreSlim _stateGate = new(1, 1);
+    private readonly SemaphoreSlim _uiPreferencesSaveGate = new(1, 1);
     private readonly object _eventGate = new();
     private readonly Dictionary<long, CancellationTokenSource> _runtimeOperations = [];
     private readonly HashSet<string> _runtimeRefreshSessions = new(StringComparer.Ordinal);
@@ -131,7 +133,8 @@ public sealed partial class AgentDeskHostController :
     public AgentDeskHostController(
         AgentDeskHostOptions options,
         IUserNotificationService? notificationService = null,
-        ExtensionApprovalHandler? extensionApprovalHandler = null)
+        ExtensionApprovalHandler? extensionApprovalHandler = null,
+        Func<CancellationToken, Task<bool>>? fullAccessApprovalHandler = null)
         : this(
             options,
             new WindowsCredentialStore(),
@@ -141,7 +144,8 @@ public sealed partial class AgentDeskHostController :
             new JsonUiPreferencesStore(),
             notificationService,
             extensionApprovalHandler,
-            new JsonCrashRecoveryStore())
+            new JsonCrashRecoveryStore(),
+            fullAccessApprovalHandler)
     {
     }
 
@@ -199,7 +203,8 @@ public sealed partial class AgentDeskHostController :
         IUiPreferencesStore uiPreferencesStore,
         IUserNotificationService? notificationService = null,
         ExtensionApprovalHandler? extensionApprovalHandler = null,
-        ICrashRecoveryStore? crashRecoveryStore = null)
+        ICrashRecoveryStore? crashRecoveryStore = null,
+        Func<CancellationToken, Task<bool>>? fullAccessApprovalHandler = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(credentialStore);
@@ -234,6 +239,7 @@ public sealed partial class AgentDeskHostController :
         _crashRecoveryStore = crashRecoveryStore ?? new EmptyCrashRecoveryStore();
         _notificationService = notificationService ?? new NullUserNotificationService();
         _extensionApprovalHandler = extensionApprovalHandler;
+        _fullAccessApprovalHandler = fullAccessApprovalHandler;
         _cloudPolicyGate = options.CloudPolicyGate ?? new AgentDeskCloudPolicyGate();
         _workspacePath = options.WorkspacePath;
         _workspaceGeneration = _workspacePath is null ? 0 : 1;
@@ -1009,36 +1015,91 @@ public sealed partial class AgentDeskHostController :
         SaveUiPreferencesWebCommand command,
         CancellationToken cancellationToken)
     {
-        UiPreferencesChangedWebEvent result;
-        await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        UiPreferencesChangedWebEvent result = new(_uiPreferences);
+        await _uiPreferencesSaveGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            ThrowIfDisposed();
-            await EnsureUiPreferencesLoadedUnsafeAsync(cancellationToken).ConfigureAwait(false);
-            var normalized = ApplyPolicyToPreferences(command.Preferences
-                .Validate()
-                .ApplyHostCapabilities(_options.IsWslStrictAvailable));
-            var restartRequired = !string.Equals(
-                _uiPreferences.Language,
-                normalized.Language,
-                StringComparison.Ordinal);
-            await _uiPreferencesStore.SaveAsync(normalized, cancellationToken).ConfigureAwait(false);
-            _uiPreferences = normalized;
-            if (_workspacePath is null && _status == "idle")
+            UiPreferences? normalized = null;
+            var requiresFullAccessApproval = false;
+
+            await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
-                _statusMessage = WorkspaceRequiredMessage;
+                ThrowIfDisposed();
+                await EnsureUiPreferencesLoadedUnsafeAsync(cancellationToken).ConfigureAwait(false);
+                normalized = ApplyPolicyToPreferences(command.Preferences
+                    .Validate()
+                    .ApplyHostCapabilities(_options.IsWslStrictAvailable));
+                requiresFullAccessApproval =
+                    !_uiPreferences.FullAccessEnabled && normalized.FullAccessEnabled;
             }
-            result = new UiPreferencesChangedWebEvent(normalized, restartRequired);
-        }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested)
-        {
-            result = new UiPreferencesChangedWebEvent(_uiPreferences);
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                result = new UiPreferencesChangedWebEvent(_uiPreferences);
+            }
+            finally
+            {
+                _stateGate.Release();
+            }
+
+            if (normalized is not null)
+            {
+                if (requiresFullAccessApproval &&
+                    !await RequestFullAccessApprovalAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    normalized = normalized with { FullAccessEnabled = false };
+                }
+
+                await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    ThrowIfDisposed();
+                    var restartRequired = !string.Equals(
+                        _uiPreferences.Language,
+                        normalized.Language,
+                        StringComparison.Ordinal);
+                    await _uiPreferencesStore
+                        .SaveAsync(normalized, cancellationToken)
+                        .ConfigureAwait(false);
+                    _uiPreferences = normalized;
+                    if (_workspacePath is null && _status == "idle")
+                    {
+                        _statusMessage = WorkspaceRequiredMessage;
+                    }
+                    result = new UiPreferencesChangedWebEvent(normalized, restartRequired);
+                }
+                catch (Exception) when (!cancellationToken.IsCancellationRequested)
+                {
+                    result = new UiPreferencesChangedWebEvent(_uiPreferences);
+                }
+                finally
+                {
+                    _stateGate.Release();
+                }
+            }
         }
         finally
         {
-            _stateGate.Release();
+            _uiPreferencesSaveGate.Release();
         }
         Publish(result);
+    }
+
+    private async Task<bool> RequestFullAccessApprovalAsync(CancellationToken cancellationToken)
+    {
+        if (_fullAccessApprovalHandler is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            return await _fullAccessApprovalHandler(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
     }
 
     public async Task SaveProviderAsync(
@@ -3449,27 +3510,109 @@ public sealed partial class AgentDeskHostController :
             return;
         }
 
-        if (_disposed ||
-            !ReferenceEquals(sourceClient, _client) ||
-            !string.Equals(request.SessionId.Value, _sessionId?.Value, StringComparison.Ordinal))
+        long engineEpoch;
+        lock (_eventGate)
+        {
+            engineEpoch = _disposed ||
+                _disposing ||
+                !ReferenceEquals(sourceClient, _client) ||
+                !string.Equals(
+                    request.SessionId.Value,
+                    _sessionId?.Value,
+                    StringComparison.Ordinal)
+                    ? 0
+                    : Volatile.Read(ref _engineEventEpoch);
+        }
+
+        if (engineEpoch == 0)
         {
             _ = CancelStalePermissionAsync(sourceClient, request.RequestId);
             return;
         }
 
-        Publish(
-            new PermissionRequestedWebEvent(
-                request.RequestId,
-                request.SessionId.Value,
-                request.ToolCallId,
-                request.Title,
-                request.Options,
-                request.Locations,
-                request.ToolKind,
-                request.RawInput));
+        var allowOnce = request.Options.FirstOrDefault(
+            option => option.Kind is PermissionOptionKind.AllowOnce);
+        if (Volatile.Read(ref _uiPreferences).FullAccessEnabled && allowOnce is not null)
+        {
+            _ = TryAutoApprovePermissionAsync(
+                engineEpoch,
+                sourceClient,
+                request,
+                allowOnce);
+            return;
+        }
+
+        if (!PublishPermissionRequest(engineEpoch, sourceClient, request))
+        {
+            _ = CancelStalePermissionAsync(sourceClient, request.RequestId);
+        }
+    }
+
+    private async Task TryAutoApprovePermissionAsync(
+        long engineEpoch,
+        IEngineClient sourceClient,
+        PermissionRequest request,
+        PermissionOption allowOnce)
+    {
+        var accepted = false;
+        try
+        {
+            accepted = await sourceClient.RespondToPermissionAsync(
+                    request.RequestId,
+                    PermissionDecision.Selected(allowOnce.OptionId),
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+        }
+
+        if (accepted)
+        {
+            return;
+        }
+
+        if (!PublishPermissionRequest(engineEpoch, sourceClient, request))
+        {
+            await CancelStalePermissionAsync(sourceClient, request.RequestId).ConfigureAwait(false);
+        }
+    }
+
+    private bool PublishPermissionRequest(
+        long engineEpoch,
+        IEngineClient sourceClient,
+        PermissionRequest request)
+    {
+        var webEvent = new PermissionRequestedWebEvent(
+            request.RequestId,
+            request.SessionId.Value,
+            request.ToolCallId,
+            request.Title,
+            request.Options,
+            request.Locations,
+            request.ToolKind,
+            request.RawInput);
+        lock (_eventGate)
+        {
+            if (_disposed ||
+                _disposing ||
+                engineEpoch != Volatile.Read(ref _engineEventEpoch) ||
+                !ReferenceEquals(sourceClient, _client) ||
+                !string.Equals(
+                    request.SessionId.Value,
+                    _sessionId?.Value,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            PublishUnsafe(webEvent);
+        }
+
         _ = TryShowNotificationAsync(
             request.SessionId.Value,
             AgentDeskNotificationKind.PermissionRequired);
+        return true;
     }
 
     private static async Task CancelStalePermissionAsync(
@@ -4022,11 +4165,11 @@ public sealed partial class AgentDeskHostController :
         }
     }
 
-    private void PublishEngineEvent(long engineEpoch, WebEvent webEvent)
+    private bool PublishEngineEvent(long engineEpoch, WebEvent webEvent)
     {
         if (_disposed || _disposing)
         {
-            return;
+            return false;
         }
 
         lock (_eventGate)
@@ -4035,10 +4178,11 @@ public sealed partial class AgentDeskHostController :
                 _disposing ||
                 engineEpoch != Volatile.Read(ref _engineEventEpoch))
             {
-                return;
+                return false;
             }
 
             PublishUnsafe(webEvent);
+            return true;
         }
     }
 

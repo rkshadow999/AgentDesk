@@ -77,11 +77,16 @@
             </StackPanel>
         </Grid>
 
-        <Grid Grid.Row="1">
+        <Grid
+            x:Name="SurfaceGrid"
+            Grid.Row="1"
+            SizeChanged="SurfaceGrid_SizeChanged">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="1" />
-                <ColumnDefinition Width="360" />
+                <ColumnDefinition Width="8" />
+                <ColumnDefinition
+                    x:Name="InspectorColumn"
+                    Width="360" />
             </Grid.ColumnDefinitions>
 
             <WebView2
@@ -89,9 +94,31 @@
                 Grid.Column="0"
                 DefaultBackgroundColor="Transparent" />
 
-            <Border
+            <Thumb
+                x:Name="InspectorSplitter"
+                x:Uid="InspectorSplitter"
                 Grid.Column="1"
-                Background="{ThemeResource AgentDeskDividerBrush}" />
+                Width="8"
+                HorizontalAlignment="Stretch"
+                AutomationProperties.AutomationId="InspectorPaneSplitter"
+                Background="Transparent"
+                DoubleTapped="InspectorSplitter_DoubleTapped"
+                DragCompleted="InspectorSplitter_DragCompleted"
+                DragDelta="InspectorSplitter_DragDelta"
+                DragStarted="InspectorSplitter_DragStarted"
+                IsTabStop="True"
+                KeyDown="InspectorSplitter_KeyDown">
+                <Thumb.Template>
+                    <ControlTemplate TargetType="Thumb">
+                        <Grid Background="{TemplateBinding Background}">
+                            <Border
+                                Width="1"
+                                HorizontalAlignment="Center"
+                                Background="{ThemeResource AgentDeskDividerBrush}" />
+                        </Grid>
+                    </ControlTemplate>
+                </Thumb.Template>
+            </Thumb>
 
             <WebView2
                 x:Name="InspectorWebView"

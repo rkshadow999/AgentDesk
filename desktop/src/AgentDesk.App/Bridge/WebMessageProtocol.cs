@@ -681,6 +681,8 @@ public static class WebMessageProtocol
                 value.Preferences.NotificationsEnabled,
                 value.Preferences.WindowsAutomationEnabled,
                 value.Preferences.BackgroundUpdateChecksEnabled,
+                value.Preferences.FullAccessEnabled,
+                value.Preferences.FontScalePercent,
                 value.RestartRequired,
             },
             PermissionRequestedWebEvent value => new
@@ -2732,7 +2734,9 @@ public static class WebMessageProtocol
                 ParseExecutionProfile(RequiredString(root, "executionProfile")),
                 RequiredBoolean(root, "notificationsEnabled"),
                 RequiredBoolean(root, "windowsAutomationEnabled"),
-                RequiredBoolean(root, "backgroundUpdateChecksEnabled")).Validate());
+                RequiredBoolean(root, "backgroundUpdateChecksEnabled"),
+                RequiredBoolean(root, "fullAccessEnabled"),
+                RequiredNonNegativeInt32(root, "fontScalePercent")).Validate());
         }
         catch (ArgumentException exception)
         {
@@ -3071,7 +3075,8 @@ public static class WebMessageProtocol
                 [
                     "language", "composerDraft", "sessionMode", "executionProfile",
                     "notificationsEnabled", "windowsAutomationEnabled",
-                    "backgroundUpdateChecksEnabled"
+                    "backgroundUpdateChecksEnabled", "fullAccessEnabled",
+                    "fontScalePercent"
                 ],
             "attachment/select" => ["requestId"],
             "attachment/discard" => ["tokens"],

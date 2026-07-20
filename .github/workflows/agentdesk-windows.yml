@@ -948,40 +948,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $currentTag = $env:GITHUB_REF_NAME
           $currentVersion = $currentTag.Substring(1)
-          function ConvertTo-AgentDeskReleaseVersion {
-            param([Parameter(Mandatory)][string]$Version)
-
-            $match = [System.Text.RegularExpressions.Regex]::Match(
-              $Version,
-              '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(ci|alpha|beta|preview|rc)\.(0|[1-9]\d*))?$')
-            if (-not $match.Success) { return $null }
-
-            $components = foreach ($groupIndex in 1..3) {
-              [uint64]$component = 0
-              if (-not [uint64]::TryParse($match.Groups[$groupIndex].Value, [ref]$component) -or
-                  $component -gt 65535) {
-                return $null
-              }
-              [int]$component
-            }
-            $revision = 65535
-            if ($match.Groups[4].Success) {
-              [uint64]$sequence = 0
-              if (-not [uint64]::TryParse($match.Groups[5].Value, [ref]$sequence) -or
-                  $sequence -gt 9999) {
-                return $null
-              }
-              $channelOffsets = @{
-                ci = 0
-                alpha = 10000
-                beta = 20000
-                preview = 30000
-                rc = 40000
-              }
-              $revision = $channelOffsets[$match.Groups[4].Value] + [int]$sequence
-            }
-            return [Version]::new($components[0], $components[1], $components[2], $revision)
-          }
+          Import-Module (Join-Path $PWD "scripts/agentdesk/AgentDesk.ReleaseHistory.psm1") -Force
 
           $currentComparableVersion = ConvertTo-AgentDeskReleaseVersion -Version $currentVersion
           if ($null -eq $currentComparableVersion) {
@@ -992,32 +959,19 @@ jobs:
 
           $releaseJson = gh release list --limit 1000 --exclude-drafts --json tagName
           if ($LASTEXITCODE -ne 0) { throw "Unable to enumerate previous GitHub Releases." }
-          $publishedReleases = foreach ($release in @($releaseJson | ConvertFrom-Json)) {
-            $candidateTag = [string]$release.tagName
-            if ($candidateTag -ceq $currentTag -or -not $candidateTag.StartsWith("v")) {
-              continue
-            }
-            $candidateVersion = ConvertTo-AgentDeskReleaseVersion -Version $candidateTag.Substring(1)
-            if ($null -ne $candidateVersion) {
-              [pscustomobject]@{
-                TagName = $candidateTag
-                ComparableVersion = $candidateVersion
-              }
-            }
-          }
-          $blockingPublishedRelease = @($publishedReleases) |
-            Where-Object { $_.ComparableVersion -ge $currentComparableVersion } |
-            Sort-Object ComparableVersion |
-            Select-Object -First 1
+          $releaseHistory = Get-AgentDeskReleaseHistory `
+            -Releases @($releaseJson | ConvertFrom-Json) `
+            -CurrentTag $currentTag
+          $blockingPublishedRelease = $releaseHistory.BlockingPublishedRelease
           if ($null -ne $blockingPublishedRelease) {
             throw "Refusing to create an out-of-order AgentDesk Release because $($blockingPublishedRelease.TagName) is already published."
           }
-          $previousRelease = @($publishedReleases) |
-            Where-Object { $_.ComparableVersion -lt $currentComparableVersion } |
-            Sort-Object ComparableVersion -Descending |
-            Select-Object -First 1
+          $previousRelease = $releaseHistory.PreviousRelease
 
           if ($null -eq $previousRelease) {
+            if ($releaseHistory.RequiresMigration) {
+              throw "Published legacy AgentDesk release history exists, but no compatible v-prefixed signed release is available for rollback; refusing to emit a first-release marker."
+            }
             $markerName = "AgentDesk-$currentVersion-NO-PREVIOUS-ROLLBACK.txt"
             [System.IO.File]::WriteAllText(
               (Join-Path $rollbackRoot $markerName),

@@ -78,12 +78,19 @@ import {
 import enUs from "./locales/en-US.json";
 import zhCn from "./locales/zh-CN.json";
 import { VirtualizedList } from "./VirtualizedList";
+import {
+  applyFontScalePercent,
+  defaultFontScalePercent,
+  fontScalePercentValues,
+  isFontScalePercent,
+  sessionRowHeightForScale,
+  type FontScalePercent
+} from "./fontScale";
 import "./styles.css";
 
 const defaultProviderBaseUrl = "https://api.x.ai/v1";
 const defaultProviderModel = "grok-build";
 const sessionPageSize = 50;
-const sessionListRowHeight = 60;
 const sessionListOverscan = 4;
 const createdWorktreeRefreshAttempts = 6;
 const createdWorktreeRefreshIntervalMs = 500;
@@ -371,6 +378,9 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [windowsAutomationEnabled, setWindowsAutomationEnabled] = useState(false);
   const [backgroundUpdateChecksEnabled, setBackgroundUpdateChecksEnabled] = useState(false);
+  const [fullAccessEnabled, setFullAccessEnabled] = useState(false);
+  const [fontScalePercent, setFontScalePercent] =
+    useState<FontScalePercent>(defaultFontScalePercent);
   const [windowsAutomationHostEnabled, setWindowsAutomationHostEnabled] = useState(false);
   const [windowsAutomationAction, setWindowsAutomationAction] =
     useState<WindowsAutomationAction>("focus-window");
@@ -570,6 +580,10 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   }, [bridge, fileReferenceQuery, workspaceGeneration, workspaceReady]);
 
   useEffect(() => {
+    applyFontScalePercent(fontScalePercent);
+  }, [fontScalePercent]);
+
+  useEffect(() => {
     if (!preferencesHydrated || !bridge.available) {
       return;
     }
@@ -582,7 +596,9 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
         executionProfile,
         notificationsEnabled,
         windowsAutomationEnabled,
-        backgroundUpdateChecksEnabled
+        backgroundUpdateChecksEnabled,
+        fullAccessEnabled,
+        fontScalePercent
       });
     }, 250);
     return () => window.clearTimeout(timeout);
@@ -595,7 +611,9 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
     executionProfile,
     notificationsEnabled,
     windowsAutomationEnabled,
-    backgroundUpdateChecksEnabled
+    backgroundUpdateChecksEnabled,
+    fullAccessEnabled,
+    fontScalePercent
   ]);
 
   useEffect(() => {
@@ -1740,6 +1758,8 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
         setNotificationsEnabled(event.notificationsEnabled);
         setWindowsAutomationEnabled(event.windowsAutomationEnabled);
         setBackgroundUpdateChecksEnabled(event.backgroundUpdateChecksEnabled);
+        setFullAccessEnabled(event.fullAccessEnabled);
+        setFontScalePercent(event.fontScalePercent);
         setWindowsAutomationHostEnabled(event.windowsAutomationEnabled);
         if (!event.windowsAutomationEnabled && windowsAutomationPendingRef.current) {
           updateWindowsAutomationPending(undefined);
@@ -3325,7 +3345,7 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
                 className="session-list"
                 items={sessions}
                 getKey={(session) => session.sessionId}
-                rowHeight={sessionListRowHeight}
+                rowHeight={sessionRowHeightForScale(fontScalePercent)}
                 overscan={sessionListOverscan}
                 ariaLabel={t("sessions")}
                 renderItem={(session, index) => {
@@ -3791,6 +3811,12 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
                     <span>WSL2</span>
                   </button>
                 </div>
+                {fullAccessEnabled && (
+                  <span className="full-access-indicator" role="status">
+                    <ShieldAlert size={12} aria-hidden="true" />
+                    {t("fullAccessActive")}
+                  </span>
+                )}
               </div>
               {engineStatus === "running" && activeSessionId ? (
                 <button className="stop-button" aria-label={t("stop")} title={t("stop")} onClick={cancelPrompt}>
@@ -4504,6 +4530,24 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
                   </div>
                 </header>
                 <div className="settings-feature-body">
+                  <label className="provider-field">
+                    <span>{t("fontScale")}</span>
+                    <select
+                      aria-label={t("fontScale")}
+                      value={String(fontScalePercent)}
+                      disabled={!preferencesHydrated}
+                      onChange={(event) => {
+                        const value = Number(event.target.value);
+                        if (isFontScalePercent(value)) {
+                          setFontScalePercent(value);
+                        }
+                      }}
+                    >
+                      {fontScalePercentValues.map((value) => (
+                        <option key={value} value={value}>{t(`fontScale_${value}`)}</option>
+                      ))}
+                    </select>
+                  </label>
                   <label className="provider-checkbox">
                     <input
                       type="checkbox"
@@ -4512,6 +4556,19 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
                     />
                     <span>{t("desktopNotificationsEnabled")}</span>
                   </label>
+                  <label className="provider-checkbox full-access-toggle">
+                    <input
+                      type="checkbox"
+                      checked={fullAccessEnabled}
+                      disabled={!preferencesHydrated}
+                      onChange={(event) => setFullAccessEnabled(event.target.checked)}
+                    />
+                    <span>{t("fullAccessEnabled")}</span>
+                  </label>
+                  <p className="settings-security-note full-access-warning">
+                    <ShieldAlert size={13} />
+                    <span>{t("fullAccessWarning")}</span>
+                  </p>
                   <label className="provider-checkbox">
                     <input
                       type="checkbox"

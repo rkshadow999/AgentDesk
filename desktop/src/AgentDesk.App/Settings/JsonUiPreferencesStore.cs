@@ -6,7 +6,7 @@ namespace AgentDesk.App.Settings;
 
 public sealed class JsonUiPreferencesStore : IUiPreferencesStore
 {
-    private const int SchemaVersion = 3;
+    private const int SchemaVersion = 4;
     private const long MaximumSettingsFileBytes = 1024 * 1024;
     private static readonly HashSet<string> SchemaOneProperties =
     [
@@ -26,6 +26,12 @@ public sealed class JsonUiPreferencesStore : IUiPreferencesStore
     [
         .. SchemaTwoProperties,
         "backgroundUpdateChecksEnabled",
+    ];
+    private static readonly HashSet<string> SchemaFourProperties =
+    [
+        .. SchemaThreeProperties,
+        "fullAccessEnabled",
+        "fontScalePercent",
     ];
 
     private readonly string _settingsPath;
@@ -77,7 +83,7 @@ public sealed class JsonUiPreferencesStore : IUiPreferencesStore
                 throw new InvalidDataException("The UI settings file must contain an object.");
             }
             var schemaVersion = root.GetProperty("schemaVersion").GetInt32();
-            if (schemaVersion is not (1 or 2 or SchemaVersion))
+            if (schemaVersion is < 1 or > SchemaVersion)
             {
                 throw new InvalidDataException("The UI settings schema version is not supported.");
             }
@@ -87,7 +93,8 @@ public sealed class JsonUiPreferencesStore : IUiPreferencesStore
                 {
                     1 => SchemaOneProperties,
                     2 => SchemaTwoProperties,
-                    _ => SchemaThreeProperties,
+                    3 => SchemaThreeProperties,
+                    _ => SchemaFourProperties,
                 });
 
             return new UiPreferences(
@@ -108,8 +115,11 @@ public sealed class JsonUiPreferencesStore : IUiPreferencesStore
                 },
                 schemaVersion >= 2 && RequiredBoolean(root, "notificationsEnabled"),
                 schemaVersion >= 2 && RequiredBoolean(root, "windowsAutomationEnabled"),
-                schemaVersion == SchemaVersion &&
-                    RequiredBoolean(root, "backgroundUpdateChecksEnabled"))
+                schemaVersion >= 3 && RequiredBoolean(root, "backgroundUpdateChecksEnabled"),
+                schemaVersion == SchemaVersion && RequiredBoolean(root, "fullAccessEnabled"),
+                schemaVersion == SchemaVersion
+                    ? RequiredInt32(root, "fontScalePercent")
+                    : 110)
                 .Validate();
         }
         catch (JsonException exception)
@@ -166,6 +176,8 @@ public sealed class JsonUiPreferencesStore : IUiPreferencesStore
                         windowsAutomationEnabled = preferences.WindowsAutomationEnabled,
                         backgroundUpdateChecksEnabled =
                             preferences.BackgroundUpdateChecksEnabled,
+                        fullAccessEnabled = preferences.FullAccessEnabled,
+                        fontScalePercent = preferences.FontScalePercent,
                     },
                     cancellationToken: cancellationToken).ConfigureAwait(false);
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -227,6 +239,14 @@ public sealed class JsonUiPreferencesStore : IUiPreferencesStore
         var value = root.GetProperty(name);
         return value.ValueKind is JsonValueKind.True or JsonValueKind.False
             ? value.GetBoolean()
+            : throw new InvalidDataException($"The UI settings '{name}' value is invalid.");
+    }
+
+    private static int RequiredInt32(JsonElement root, string name)
+    {
+        var value = root.GetProperty(name);
+        return value.ValueKind is JsonValueKind.Number && value.TryGetInt32(out var number)
+            ? number
             : throw new InvalidDataException($"The UI settings '{name}' value is invalid.");
     }
 }

@@ -25,7 +25,7 @@ monaco.editor.defineTheme("agentdesk-dark", {
   }
 });
 
-export function mountMonacoDiffViewer(container: HTMLElement): DiffViewer {
+export function mountMonacoDiffViewer(container: HTMLElement, fontSize = 12): DiffViewer {
   const editor = monaco.editor.createDiffEditor(container, {
     automaticLayout: true,
     readOnly: true,
@@ -37,7 +37,7 @@ export function mountMonacoDiffViewer(container: HTMLElement): DiffViewer {
     wordWrap: "on",
     lineNumbersMinChars: 3,
     fontFamily: '"Cascadia Code", Consolas, monospace',
-    fontSize: 12,
+    fontSize,
     padding: { top: 10, bottom: 10 },
     theme: "agentdesk-dark"
   });
@@ -59,6 +59,9 @@ export function mountMonacoDiffViewer(container: HTMLElement): DiffViewer {
       original = monaco.editor.createModel(diff.oldText, language);
       modified = monaco.editor.createModel(diff.newText, language);
       editor.setModel({ original, modified });
+    },
+    setFontSize(nextFontSize) {
+      editor.updateOptions({ fontSize: nextFontSize });
     },
     layout() {
       editor.layout();

@@ -49,6 +49,29 @@ describe("createTranslator", () => {
     });
   });
 
+  it("localizes font scale and full access preferences", () => {
+    expect(zhCn).toMatchObject({
+      fontScale: "界面字体大小",
+      fontScale_90: "较小 (90%)",
+      fontScale_100: "标准 (100%)",
+      fontScale_110: "舒适 (110%)",
+      fontScale_125: "较大 (125%)",
+      fontScale_140: "特大 (140%)",
+      fullAccessEnabled: "启用完全访问",
+      fullAccessActive: "完全访问已开启"
+    });
+    expect(enUs).toMatchObject({
+      fontScale: "Interface font size",
+      fontScale_90: "Smaller (90%)",
+      fontScale_100: "Standard (100%)",
+      fontScale_110: "Comfortable (110%)",
+      fontScale_125: "Large (125%)",
+      fontScale_140: "Extra large (140%)",
+      fullAccessEnabled: "Enable full access",
+      fullAccessActive: "Full access enabled"
+    });
+  });
+
   it("localizes trusted background update availability", () => {
     expect(zhCn.backgroundUpdateAvailable).toBe(
       "已在后台暂存可信更新，可随时安装并重启"

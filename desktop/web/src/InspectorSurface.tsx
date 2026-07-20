@@ -28,6 +28,11 @@ import {
   type TerminalViewer
 } from "./inspectorRuntime";
 import { TerminalRevisionGate } from "./terminalRevisionGate";
+import {
+  applyFontScalePercent,
+  codeFontSizeForScale,
+  defaultFontScalePercent
+} from "./fontScale";
 import enUs from "./locales/en-US.json";
 import zhCn from "./locales/zh-CN.json";
 import "./styles.css";
@@ -67,6 +72,7 @@ export function InspectorSurface({
   const terminalTranscriptRef = useRef(state.terminalTranscript);
   const terminalRevisionRef = useRef(state.terminalRevision);
   const terminalRevisionGateRef = useRef(new TerminalRevisionGate());
+  const fontScalePercentRef = useRef(defaultFontScalePercent);
   selectedDiffRef.current = selectedDiff;
   terminalTranscriptRef.current = state.terminalTranscript;
   terminalRevisionRef.current = state.terminalRevision;
@@ -76,13 +82,20 @@ export function InspectorSurface({
     return bridge.subscribe((event: HostEvent) => {
       if (event.type === "ui/preferences/changed") {
         setLanguage(event.language);
+        fontScalePercentRef.current = event.fontScalePercent;
+        applyFontScalePercent(event.fontScalePercent);
+        const fontSize = codeFontSizeForScale(event.fontScalePercent);
+        diffViewerRef.current?.setFontSize(fontSize);
+        diffViewerRef.current?.layout();
+        terminalViewerRef.current?.setFontSize(fontSize);
+        terminalViewerRef.current?.fit();
       }
       dispatch(event);
     });
   }, [bridge]);
 
   useEffect(() => {
-    if (activeTab !== "changes" || !diffHostRef.current) {
+    if (!diffHostRef.current) {
       return;
     }
     let disposed = false;
@@ -92,6 +105,7 @@ export function InspectorSurface({
         return;
       }
       diffViewerRef.current = viewer;
+      viewer.setFontSize(codeFontSizeForScale(fontScalePercentRef.current));
       viewer.setDiff(selectedDiffRef.current);
     });
     return () => {
@@ -99,14 +113,14 @@ export function InspectorSurface({
       diffViewerRef.current?.dispose();
       diffViewerRef.current = undefined;
     };
-  }, [activeTab, runtime, hasDiffs]);
+  }, [runtime, hasDiffs]);
 
   useEffect(() => {
     diffViewerRef.current?.setDiff(selectedDiff);
   }, [selectedDiff]);
 
   useEffect(() => {
-    if (activeTab !== "terminal" || !terminalHostRef.current) {
+    if (!state.sessionId || !terminalHostRef.current) {
       return;
     }
     let disposed = false;
@@ -117,6 +131,7 @@ export function InspectorSurface({
         return;
       }
       terminalViewerRef.current = viewer;
+      viewer.setFontSize(codeFontSizeForScale(fontScalePercentRef.current));
       viewer.replaceText(getTerminalSnapshot(terminalTranscriptRef.current));
       terminalRevisionGateRef.current.markSnapshot(terminalRevisionRef.current);
     });
@@ -126,7 +141,7 @@ export function InspectorSurface({
       terminalViewerRef.current = undefined;
       terminalRevisionGateRef.current.reset();
     };
-  }, [activeTab, runtime, state.sessionId]);
+  }, [runtime, state.sessionId]);
 
   useEffect(() => {
     const viewer = terminalViewerRef.current;
@@ -140,6 +155,14 @@ export function InspectorSurface({
       viewer.replaceText(getTerminalSnapshot(state.terminalTranscript));
     }
   }, [state.terminalRevision, state.terminalAppend, state.terminalTranscript]);
+
+  useEffect(() => {
+    if (activeTab === "changes") {
+      diffViewerRef.current?.layout();
+    } else if (activeTab === "terminal") {
+      terminalViewerRef.current?.fit();
+    }
+  }, [activeTab]);
 
   useEffect(() => {
     const layout = () => {
@@ -200,11 +223,12 @@ export function InspectorSurface({
       </div>
 
       <section className="inspector-content">
-        {activeTab === "changes" && (
-          state.diffs.length === 0 ? (
-            <div className="inspector-empty">{t("noChangesToReview")}</div>
+        {state.diffs.length === 0 ? (
+            <div className="inspector-empty" hidden={activeTab !== "changes"}>
+              {t("noChangesToReview")}
+            </div>
           ) : (
-            <div className="changes-layout">
+            <div className="changes-layout" hidden={activeTab !== "changes"}>
               <div className="inspector-file-list" aria-label={t("changedFiles")}>
                 {state.diffs.map((diff) => (
                   <button
@@ -221,17 +245,14 @@ export function InspectorSurface({
               </div>
               <div className="diff-viewer" ref={diffHostRef} aria-label={t("codeDiff")} />
             </div>
-          )
         )}
 
-        {activeTab === "terminal" && (
-          <div className="terminal-pane">
+        <div className="terminal-pane" hidden={activeTab !== "terminal"}>
             {state.terminalTranscript.characterCount === 0 && (
               <div className="inspector-empty overlay">{t("noTerminalOutput")}</div>
             )}
             <div className="terminal-viewer" ref={terminalHostRef} aria-label={t("terminalOutput")} />
-          </div>
-        )}
+        </div>
 
         {activeTab === "plan" && (
           state.plan.length === 0 ? (

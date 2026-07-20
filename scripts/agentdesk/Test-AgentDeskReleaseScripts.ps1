@@ -16,6 +16,7 @@ $linuxEngineArchitectureVerifier = Join-Path $PSScriptRoot "Test-AgentDeskLinuxE
 $rollbackTest = Join-Path $PSScriptRoot "Test-AgentDeskRollbackBundle.ps1"
 $updateManifestTest = Join-Path $PSScriptRoot "Test-AgentDeskUpdateManifest.ps1"
 $updateFeedAdvanceTest = Join-Path $PSScriptRoot "Test-AgentDeskUpdateFeedAdvance.ps1"
+$releaseHistoryTest = Join-Path $PSScriptRoot "Test-AgentDeskReleaseHistory.ps1"
 $wslInstallerTest = Join-Path $PSScriptRoot "Test-AgentDeskWslInstaller.ps1"
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $rustVersionBuildScripts = @(
@@ -25,6 +26,7 @@ $rustVersionBuildScripts = @(
 
 & $rollbackTest
 & $updateFeedAdvanceTest
+& $releaseHistoryTest
 & $wslInstallerTest
 & $engineRevisionTest
 
@@ -1192,9 +1194,11 @@ foreach ($requiredRollbackWorkflow in @(
     "gh release download",
     "New-AgentDeskRollbackBundle.ps1",
     "-RequireSignedMsix",
+    "AgentDesk.ReleaseHistory.psm1",
     "ConvertTo-AgentDeskReleaseVersion",
-    'Where-Object { $_.ComparableVersion -lt $currentComparableVersion }',
-    'Sort-Object ComparableVersion -Descending'
+    "Get-AgentDeskReleaseHistory",
+    '$releaseHistory.RequiresMigration',
+    "refusing to emit a first-release marker"
 )) {
     if (-not $workflowSource.Contains($requiredRollbackWorkflow)) {
         throw "The tag release workflow is missing rollback requirement '$requiredRollbackWorkflow'."
@@ -1342,7 +1346,9 @@ foreach ($requiredSignedRollbackCheck in @(
     '--pattern "AgentDesk-update-manifest.json"',
     '--pattern "AgentDesk-update-manifest.json.sig"',
     '--pattern "AgentDesk-update-public-key.spki"',
-    'Where-Object { $_.ComparableVersion -ge $currentComparableVersion }',
+    'Get-AgentDeskReleaseHistory',
+    '$releaseHistory.BlockingPublishedRelease',
+    '$releaseHistory.RequiresMigration',
     'Refusing to create an out-of-order AgentDesk Release',
     '-PreviousUpdateManifestPath (Join-Path $downloadRoot "AgentDesk-update-manifest.json")',
     '-PreviousUpdateManifestSignaturePath (Join-Path $downloadRoot "AgentDesk-update-manifest.json.sig")',
@@ -1509,6 +1515,16 @@ foreach ($releaseGuide in @(
     )) {
         if (-not $releaseGuideSource.Contains($requiredFixedFeedGuidance)) {
             throw "Release guidance '$releaseGuide' is missing fixed-feed recovery guidance '$requiredFixedFeedGuidance'."
+        }
+    }
+    foreach ($requiredLegacyMigrationGuidance in @(
+        "0.1.0-alpha.5",
+        "NO-PREVIOUS-ROLLBACK.txt",
+        "legacy",
+        "v"
+    )) {
+        if (-not $releaseGuideSource.Contains($requiredLegacyMigrationGuidance)) {
+            throw "Release guidance '$releaseGuide' is missing legacy release migration contract '$requiredLegacyMigrationGuidance'."
         }
     }
 }

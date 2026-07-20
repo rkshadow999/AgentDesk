@@ -6,13 +6,13 @@ import type { TerminalViewer } from "./inspectorRuntime";
 
 const MAX_PENDING_CHUNKS = 64;
 
-export function mountXtermViewer(container: HTMLElement): TerminalViewer {
+export function mountXtermViewer(container: HTMLElement, fontSize = 12): TerminalViewer {
   const terminal = new Terminal({
     convertEol: true,
     cursorBlink: false,
     disableStdin: true,
     fontFamily: '"Cascadia Code", Consolas, monospace',
-    fontSize: 12,
+    fontSize,
     scrollback: 100_000,
     theme: {
       background: "#181a19",
@@ -116,6 +116,11 @@ export function mountXtermViewer(container: HTMLElement): TerminalViewer {
       pendingCharacterCount = 0;
       pendingReplacement = snapshot.slice(-TERMINAL_TRANSCRIPT_MAX_CHARS);
       scheduleFlush();
+    },
+    setFontSize(nextFontSize) {
+      if (!disposed) {
+        terminal.options.fontSize = nextFontSize;
+      }
     },
     fit() {
       fitAddon.fit();

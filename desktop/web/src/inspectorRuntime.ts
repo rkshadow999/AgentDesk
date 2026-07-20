@@ -2,6 +2,7 @@ import type { InspectorDiff } from "./inspectorModel";
 
 export interface DiffViewer {
   setDiff(diff?: InspectorDiff): void;
+  setFontSize(fontSize: number): void;
   layout(): void;
   dispose(): void;
 }
@@ -9,6 +10,7 @@ export interface DiffViewer {
 export interface TerminalViewer {
   appendText(text: string): boolean;
   replaceText(snapshot: string): void;
+  setFontSize(fontSize: number): void;
   fit(): void;
   dispose(): void;
 }
