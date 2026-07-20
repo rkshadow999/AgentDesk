@@ -517,6 +517,33 @@ try {
             -Content $runtimePackage.LegalText
     }
 
+    $fixturePreferredHostRoot = Join-Path `
+        $fixtureNuGetRoot `
+        "microsoft.netcore.app.host.win-x64\10.0.10"
+    [System.IO.Directory]::CreateDirectory($fixturePreferredHostRoot) | Out-Null
+    $fixturePreferredHostNuspec = @'
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>Microsoft.NETCore.App.Host.win-x64</id>
+    <version>10.0.10</version>
+    <authors>AgentDesk tests</authors>
+    <license type="file">LICENSE.TXT</license>
+    <projectUrl>https://dot.net/</projectUrl>
+    <description>Preferred host-pack legal fixture.</description>
+  </metadata>
+</package>
+'@
+    Write-Utf8NoBom `
+        -Path (Join-Path $fixturePreferredHostRoot "microsoft.netcore.app.host.win-x64.nuspec") `
+        -Content $fixturePreferredHostNuspec
+    Write-Utf8NoBom `
+        -Path (Join-Path $fixturePreferredHostRoot "LICENSE.TXT") `
+        -Content "Fixture preferred x64 NuGet host legal text."
+    Write-Utf8NoBom `
+        -Path (Join-Path $fixturePreferredHostRoot "THIRD-PARTY-NOTICES.TXT") `
+        -Content "Fixture preferred x64 NuGet host third-party notice text."
+
     $fixtureAssets = [ordered]@{
         version = 3
         targets = [ordered]@{
@@ -548,7 +575,10 @@ try {
                 }
             }
         }
-        packageFolders = [ordered]@{ ($fixtureNuGetRoot.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar) = [ordered]@{} }
+        packageFolders = [ordered]@{
+            ((Join-Path $fixtureDotNetRoot "packs").TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar) = [ordered]@{}
+            ($fixtureNuGetRoot.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar) = [ordered]@{}
+        }
     }
     $fixtureAssetsPath = Join-Path $fixtureProjectRoot "obj\project.assets.json"
     Write-Utf8NoBom -Path $fixtureAssetsPath -Content ($fixtureAssets | ConvertTo-Json -Depth 20)
@@ -564,8 +594,8 @@ try {
         "Fixture NuGet license text.",
         "Fixture NuGet notice text.",
         "Fixture x64 runtime legal text.",
-        "Fixture x64 host legal text.",
-        "Fixture x64 host third-party notice text.",
+        "Fixture preferred x64 NuGet host legal text.",
+        "Fixture preferred x64 NuGet host third-party notice text.",
         "Fixture ARM64 runtime legal text.",
         "Fixture ARM64 host legal text."
     )) {
@@ -704,6 +734,49 @@ try {
 }
 finally {
     Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+$appProjectPath = Join-Path $repositoryRoot "desktop\src\AgentDesk.App\AgentDesk.App.csproj"
+[xml]$appProjectXml = Get-Content -LiteralPath $appProjectPath -Raw
+$hostDownloadTarget = $appProjectXml.SelectSingleNode(
+    "/Project/Target[@Name='AgentDeskEnsureDeterministicHostPackDownloads']")
+if ($null -eq $hostDownloadTarget -or
+    -not [string]::Equals(
+        [string]$hostDownloadTarget.AfterTargets,
+        "ProcessFrameworkReferences",
+        [System.StringComparison]::Ordinal) -or
+    -not [string]::Equals(
+        [string]$hostDownloadTarget.BeforeTargets,
+        "CollectPackageDownloads",
+        [System.StringComparison]::Ordinal)) {
+    throw "AgentDesk App must normalize Host pack downloads after framework resolution and before NuGet collection."
+}
+$hostPackageDownloads = @($hostDownloadTarget.SelectNodes("ItemGroup/PackageDownload"))
+foreach ($hostPackageId in @(
+    "Microsoft.NETCore.App.Host.win-x64",
+    "Microsoft.NETCore.App.Host.win-arm64"
+)) {
+    $matchingRemovals = @($hostPackageDownloads | Where-Object {
+        [string]::Equals(
+            $_.GetAttribute("Remove"),
+            $hostPackageId,
+            [System.StringComparison]::OrdinalIgnoreCase)
+    })
+    $matchingIncludes = @($hostPackageDownloads | Where-Object {
+        [string]::Equals(
+            $_.GetAttribute("Include"),
+            $hostPackageId,
+            [System.StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($matchingRemovals.Count -ne 1 -or $matchingIncludes.Count -ne 1) {
+        throw "AgentDesk App must explicitly download exactly one $hostPackageId package for deterministic notices."
+    }
+    if (-not [string]::Equals(
+            [string]$matchingIncludes[0].Version,
+            '[$(BundledNETCoreAppPackageVersion)]',
+            [System.StringComparison]::Ordinal)) {
+        throw "$hostPackageId must track the SDK bundled .NET runtime package version."
+    }
 }
 
 $workflowSource = (Get-Content -LiteralPath (Join-Path $repositoryRoot ".github\workflows\agentdesk-windows.yml") -Raw) `

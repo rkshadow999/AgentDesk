@@ -231,9 +231,11 @@ function Get-ExactPackageVersion {
 function Get-PackageDirectory {
     param(
         [Parameter(Mandatory)][string]$PackagePath,
-        [Parameter(Mandatory)][string[]]$PackageFolders
+        [Parameter(Mandatory)][string[]]$PackageFolders,
+        [switch]$PreferPackageMetadata
     )
 
+    $fallback = $null
     foreach ($packageFolder in $PackageFolders) {
         $fullRoot = (Get-FullPath $packageFolder).TrimEnd(
             [System.IO.Path]::DirectorySeparatorChar,
@@ -244,8 +246,19 @@ function Get-PackageDirectory {
             throw "NuGet package path escapes the restored package root: $PackagePath"
         }
         if (Test-Path -LiteralPath $candidate -PathType Container) {
-            return $candidate
+            if (-not $PreferPackageMetadata) {
+                return $candidate
+            }
+            if ($null -eq $fallback) {
+                $fallback = $candidate
+            }
+            if (@(Get-ChildItem -LiteralPath $candidate -File -Filter "*.nuspec").Count -gt 0) {
+                return $candidate
+            }
         }
+    }
+    if ($null -ne $fallback) {
+        return $fallback
     }
     throw "Restored NuGet package is missing from all package folders: $PackagePath"
 }
@@ -535,8 +548,12 @@ foreach ($framework in @($assets.project.frameworks.psobject.Properties)) {
         $identity = "$packageId/$packageVersion"
         if (-not $resolvedPackages.ContainsKey($identity)) {
             $packagePath = "$($packageId.ToLowerInvariant())/$packageVersion"
-            $packageDirectory = Get-PackageDirectory -PackagePath $packagePath -PackageFolders $packageSearchRoots.ToArray()
-            if ($packageId -match '^Microsoft\.NETCore\.App\.Host\.') {
+            $isHostPackage = $packageId -match '^Microsoft\.NETCore\.App\.Host\.'
+            $packageDirectory = Get-PackageDirectory `
+                -PackagePath $packagePath `
+                -PackageFolders $packageSearchRoots.ToArray() `
+                -PreferPackageMetadata:$isHostPackage
+            if ($isHostPackage) {
                 $resolvedPackages[$identity] = Get-HostPackageRecord `
                     -ExpectedId $packageId `
                     -ExpectedVersion $packageVersion `
@@ -567,7 +584,10 @@ foreach ($runtimeDependency in @($downloadDependencies.GetEnumerator() | Where-O
         continue
     }
     $hostPackagePath = "$($hostPackageId.ToLowerInvariant())/$hostVersion"
-    $hostPackageDirectory = Get-PackageDirectory -PackagePath $hostPackagePath -PackageFolders $packageSearchRoots.ToArray()
+    $hostPackageDirectory = Get-PackageDirectory `
+        -PackagePath $hostPackagePath `
+        -PackageFolders $packageSearchRoots.ToArray() `
+        -PreferPackageMetadata
     $resolvedPackages[$hostIdentity] = Get-HostPackageRecord `
         -ExpectedId $hostPackageId `
         -ExpectedVersion $hostVersion `

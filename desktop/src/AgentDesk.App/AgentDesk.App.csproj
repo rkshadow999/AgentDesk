@@ -35,6 +35,19 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7705" />
   </ItemGroup>
 
+  <Target Name="AgentDeskEnsureDeterministicHostPackDownloads"
+          AfterTargets="ProcessFrameworkReferences"
+          BeforeTargets="CollectPackageDownloads">
+    <ItemGroup>
+      <PackageDownload Remove="Microsoft.NETCore.App.Host.win-x64" />
+      <PackageDownload Remove="Microsoft.NETCore.App.Host.win-arm64" />
+      <PackageDownload Include="Microsoft.NETCore.App.Host.win-x64"
+                       Version="[$(BundledNETCoreAppPackageVersion)]" />
+      <PackageDownload Include="Microsoft.NETCore.App.Host.win-arm64"
+                       Version="[$(BundledNETCoreAppPackageVersion)]" />
+    </ItemGroup>
+  </Target>
+
   <ItemGroup>
     <ProjectReference Include="..\AgentDesk.Cloud.Client\AgentDesk.Cloud.Client.csproj" />
     <ProjectReference Include="..\AgentDesk.Core\AgentDesk.Core.csproj" />
