@@ -65,7 +65,7 @@ SHA-256(c9b3ccf2dd92519a17720056dc43c1f3bb55f4652a1d99e68f99160657611e37)
 
 ---
 
-## 2. 当前 alpha.8 已交付的能力（用户可感知）
+## 2. 当前 alpha.9 已交付的能力（用户可感知）
 
 | 能力 | 说明 |
 | --- | --- |
@@ -156,8 +156,8 @@ $env:DOTNET_ROOT = "$env:USERPROFILE\.dotnet"
 $env:PATH = "$env:USERPROFILE\.dotnet;C:\Program Files\PowerShell\7;" + $env:PATH
 
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\agentdesk\Publish-AgentDeskSelfHostedUpdate.ps1 `
-  -Version "0.1.0-alpha.8" `
-  -ReleaseDirectory ".\artifacts\release-alpha.8-selfhost\AgentDesk-0.1.0-alpha.8-win-x64"
+  -Version "0.1.0-alpha.9" `
+  -ReleaseDirectory ".\artifacts\release-alpha.9-selfhost\AgentDesk-0.1.0-alpha.9-win-x64"
 ```
 
 发布产物目录（本机，已 gitignore）：`artifacts/release-alpha.*`、`artifacts/selfhosted-feed/`。
