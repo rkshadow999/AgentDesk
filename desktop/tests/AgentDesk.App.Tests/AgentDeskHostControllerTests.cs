@@ -2090,6 +2090,10 @@ public sealed class AgentDeskHostControllerTests
     {
         var fixture = new ControllerFixture();
         fixture.Credentials.Save("xai", "xai-test-key");
+        fixture.UiPreferences.Preferences = UiPreferences.Default with
+        {
+            NotificationsEnabled = false,
+        };
         _ = fixture.Factory.EnqueueEngine("C:\\workspace", "session-1");
         await using var controller = fixture.CreateController();
 
@@ -2097,6 +2101,47 @@ public sealed class AgentDeskHostControllerTests
             new PromptWebCommand("done", ExecutionProfile.NativeProtected));
 
         Assert.Empty(fixture.Notifications.Snapshot());
+    }
+
+    [Fact]
+    public async Task NotificationsEnabled_StillToastsWhenSessionFocusChangedMidPrompt()
+    {
+        // Multi-session: user may open another thread while a prompt is still finishing.
+        // The completion toast must still fire for the original session id.
+        var fixture = new ControllerFixture();
+        fixture.Credentials.Save("xai", "xai-test-key");
+        fixture.UiPreferences.Preferences = UiPreferences.Default with
+        {
+            Language = "zh-CN",
+            NotificationsEnabled = true,
+        };
+        var engine = fixture.Factory.EnqueueEngine("C:\\workspace", "session-running");
+        var promptStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePrompt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        engine.PromptHandler = async (_, _, token) =>
+        {
+            promptStarted.TrySetResult();
+            await releasePrompt.Task.WaitAsync(token);
+            return new PromptResult(EngineStopReason.EndTurn, "end_turn");
+        };
+        await using var controller = fixture.CreateController();
+
+        var promptTask = controller.HandleAsync(
+            new PromptWebCommand("long task", ExecutionProfile.NativeProtected));
+        await promptStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Switch focus to a different indexed session while the first turn is in flight.
+        await fixture.SessionIndex.UpsertAsync(
+            [Session("session-other", "其他会话", "C:\\workspace")]);
+        await controller.OpenIndexedSessionAsync("session-other");
+
+        releasePrompt.TrySetResult();
+        await promptTask.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var completed = Assert.Single(
+            fixture.Notifications.Snapshot(),
+            item => item.Notification.Kind == AgentDeskNotificationKind.TaskCompleted);
+        Assert.Equal("session-running", completed.Notification.SessionId);
     }
 
     [Fact]

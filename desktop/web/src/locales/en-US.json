@@ -196,7 +196,7 @@
   "saveProvider": "Save provider",
   "desktopPreferencesTitle": "Desktop preferences",
   "desktopPreferencesDescription": "Manage local notifications and explicitly enabled experimental capabilities.",
-  "desktopNotificationsEnabled": "Enable desktop notifications",
+  "desktopNotificationsEnabled": "Enable desktop notifications (toast when a session finishes; one toast per session)",
   "fontScale": "Interface font size",
   "fontScale_90": "Smaller (90%)",
   "fontScale_100": "Standard (100%)",

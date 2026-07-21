@@ -21,7 +21,9 @@ public sealed record UiPreferences(
         string.Empty,
         SessionMode.Default,
         ExecutionProfile.NativeProtected,
-        NotificationsEnabled: false,
+        // Session completion / multi-session status toasts are on by default so
+        // users notice finished turns while looking at another thread or desktop.
+        NotificationsEnabled: true,
         WindowsAutomationEnabled: false,
         BackgroundUpdateChecksEnabled: false,
         FullAccessEnabled: false,

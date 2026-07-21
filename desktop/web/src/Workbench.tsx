@@ -409,7 +409,8 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   const [memoryMutationChallenge, setMemoryMutationChallenge] =
     useState<MemoryMutationChallenge>();
   const [preferencesHydrated, setPreferencesHydrated] = useState(false);
-  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  // Match host default: session-completion toasts are on unless the user opts out.
+  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [windowsAutomationEnabled, setWindowsAutomationEnabled] = useState(false);
   const [backgroundUpdateChecksEnabled, setBackgroundUpdateChecksEnabled] = useState(false);
   const [fullAccessEnabled, setFullAccessEnabled] = useState(false);

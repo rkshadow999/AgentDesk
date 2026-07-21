@@ -9,7 +9,12 @@ public enum AgentDeskNotificationKind
 
 public sealed class AgentDeskUserNotification
 {
-    public AgentDeskUserNotification(string sessionId, AgentDeskNotificationKind kind)
+    public const int MaximumSessionLabelLength = 80;
+
+    public AgentDeskUserNotification(
+        string sessionId,
+        AgentDeskNotificationKind kind,
+        string? sessionLabel = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
         if (!IsValidSessionId(sessionId) || !Enum.IsDefined(kind))
@@ -18,34 +23,105 @@ public sealed class AgentDeskUserNotification
         }
         SessionId = sessionId;
         Kind = kind;
+        SessionLabel = SanitizeSessionLabel(sessionLabel);
     }
 
     public string SessionId { get; }
 
     public AgentDeskNotificationKind Kind { get; }
 
+    /// <summary>
+    /// Optional human-readable session title. Never includes prompt text or file bodies.
+    /// </summary>
+    public string? SessionLabel { get; }
+
     public string Title(string language) => (language, Kind) switch
     {
-        ("zh-CN", AgentDeskNotificationKind.TaskCompleted) => "任务已完成",
-        ("zh-CN", AgentDeskNotificationKind.TaskFailed) => "任务执行失败",
+        ("zh-CN", AgentDeskNotificationKind.TaskCompleted) => "会话已完成",
+        ("zh-CN", AgentDeskNotificationKind.TaskFailed) => "会话执行失败",
         ("zh-CN", AgentDeskNotificationKind.PermissionRequired) => "需要权限确认",
-        (_, AgentDeskNotificationKind.TaskCompleted) => "Task completed",
-        (_, AgentDeskNotificationKind.TaskFailed) => "Task failed",
+        (_, AgentDeskNotificationKind.TaskCompleted) => "Session completed",
+        (_, AgentDeskNotificationKind.TaskFailed) => "Session failed",
         (_, AgentDeskNotificationKind.PermissionRequired) => "Permission required",
         _ => throw new ArgumentOutOfRangeException(),
     };
 
-    public string Body(string language) => language == "zh-CN"
-        ? $"AgentDesk 会话 {SessionId} 的状态已更新。"
-        : $"AgentDesk session {SessionId} has a status update.";
+    public string Body(string language)
+    {
+        var label = SessionLabel;
+        if (language == "zh-CN")
+        {
+            return Kind switch
+            {
+                AgentDeskNotificationKind.TaskCompleted => label is null
+                    ? "一个会话的任务已完成。点击可打开该会话。"
+                    : $"「{label}」已完成。点击可打开该会话。",
+                AgentDeskNotificationKind.TaskFailed => label is null
+                    ? "一个会话的任务失败。点击可打开该会话。"
+                    : $"「{label}」执行失败。点击可打开该会话。",
+                AgentDeskNotificationKind.PermissionRequired => label is null
+                    ? "有会话正在等待权限确认。点击可打开该会话。"
+                    : $"「{label}」正在等待权限确认。点击可打开。",
+                _ => throw new ArgumentOutOfRangeException(),
+            };
+        }
+
+        return Kind switch
+        {
+            AgentDeskNotificationKind.TaskCompleted => label is null
+                ? "A session finished. Click to open it."
+                : $"\"{label}\" finished. Click to open it.",
+            AgentDeskNotificationKind.TaskFailed => label is null
+                ? "A session failed. Click to open it."
+                : $"\"{label}\" failed. Click to open it.",
+            AgentDeskNotificationKind.PermissionRequired => label is null
+                ? "A session needs permission. Click to open it."
+                : $"\"{label}\" needs permission. Click to open it.",
+            _ => throw new ArgumentOutOfRangeException(),
+        };
+    }
 
     public override string ToString() =>
-        $"AgentDeskUserNotification {{ SessionId = {SessionId}, Kind = {Kind} }}";
+        $"AgentDeskUserNotification {{ SessionId = {SessionId}, Kind = {Kind}, Label = {SessionLabel ?? "(none)"} }}";
 
     internal static bool IsValidSessionId(string sessionId) =>
         sessionId.Length is > 0 and <= 128 &&
         sessionId.All(static character =>
             char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.' or ':');
+
+    internal static string? SanitizeSessionLabel(string? label)
+    {
+        if (string.IsNullOrWhiteSpace(label))
+        {
+            return null;
+        }
+
+        var builder = new System.Text.StringBuilder(label.Length);
+        foreach (var character in label.Trim())
+        {
+            if (char.IsControl(character))
+            {
+                continue;
+            }
+            builder.Append(character);
+            if (builder.Length >= MaximumSessionLabelLength)
+            {
+                break;
+            }
+        }
+
+        if (builder.Length == 0)
+        {
+            return null;
+        }
+
+        if (builder.Length == MaximumSessionLabelLength)
+        {
+            builder.Append('…');
+        }
+
+        return builder.ToString();
+    }
 }
 
 public interface IUserNotificationService

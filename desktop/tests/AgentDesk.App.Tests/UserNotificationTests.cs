@@ -5,21 +5,33 @@ namespace AgentDesk.App.Tests;
 public sealed class UserNotificationTests
 {
     [Theory]
-    [InlineData(AgentDeskNotificationKind.TaskCompleted, "任务已完成", "Task completed")]
-    [InlineData(AgentDeskNotificationKind.TaskFailed, "任务执行失败", "Task failed")]
+    [InlineData(AgentDeskNotificationKind.TaskCompleted, "会话已完成", "Session completed")]
+    [InlineData(AgentDeskNotificationKind.TaskFailed, "会话执行失败", "Session failed")]
     [InlineData(AgentDeskNotificationKind.PermissionRequired, "需要权限确认", "Permission required")]
-    public void ContentUsesOnlyGenericStatusAndTheBoundedSessionId(
+    public void ContentUsesOnlyGenericStatusAndOptionalSessionLabel(
         AgentDeskNotificationKind kind,
         string chineseTitle,
         string englishTitle)
     {
-        var notification = new AgentDeskUserNotification("session-42", kind);
+        var notification = new AgentDeskUserNotification("session-42", kind, "登录修复");
 
         Assert.Equal(chineseTitle, notification.Title("zh-CN"));
         Assert.Equal(englishTitle, notification.Title("en-US"));
-        Assert.Contains("session-42", notification.Body("zh-CN"), StringComparison.Ordinal);
+        Assert.Contains("登录修复", notification.Body("zh-CN"), StringComparison.Ordinal);
+        Assert.DoesNotContain("session-42", notification.Body("zh-CN"), StringComparison.Ordinal);
         Assert.DoesNotContain("prompt", notification.ToString(), StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("file", notification.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ContentFallsBackWhenSessionLabelIsMissing()
+    {
+        var notification = new AgentDeskUserNotification(
+            "session-42",
+            AgentDeskNotificationKind.TaskCompleted);
+
+        Assert.Contains("一个会话", notification.Body("zh-CN"), StringComparison.Ordinal);
+        Assert.Contains("finished", notification.Body("en-US"), StringComparison.OrdinalIgnoreCase);
     }
 
     [Theory]
@@ -45,8 +57,8 @@ public sealed class UserNotificationTests
             "zh-CN");
 
         var payload = Assert.Single(publisher.Payloads);
-        Assert.Equal("任务已完成", payload.Title);
-        Assert.Equal("AgentDesk 会话 session-42 的状态已更新。", payload.Body);
+        Assert.Equal("会话已完成", payload.Title);
+        Assert.Contains("一个会话", payload.Body, StringComparison.Ordinal);
         Assert.Equal("session-42", payload.SessionId);
         Assert.DoesNotContain("prompt", payload.Title + payload.Body, StringComparison.OrdinalIgnoreCase);
     }

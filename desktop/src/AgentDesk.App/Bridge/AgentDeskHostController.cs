@@ -3562,11 +3562,20 @@ public sealed partial class AgentDeskHostController :
 
             promptCancellation.Dispose();
 
+            // Multi-session: still toast when the focused thread changed mid-run.
+            // Only drop the notification if the engine generation truly died.
+            var generationAlive = !_disposed &&
+                _crashedGeneration != context.Generation &&
+                _engineGeneration == context.Generation &&
+                ReferenceEquals(_client, context.Client);
             if (!canPublish)
             {
                 completedEvent = null;
                 statusEvent = null;
-                notificationKind = null;
+                if (!generationAlive)
+                {
+                    notificationKind = null;
+                }
             }
             else if (statusEvent is null)
             {
@@ -4208,8 +4217,24 @@ public sealed partial class AgentDeskHostController :
                 _stateGate.Release();
             }
 
+            // Best-effort title lookup so multi-session toasts are distinguishable.
+            // Never fall back to prompt text or workspace file contents.
+            string? sessionLabel = null;
+            try
+            {
+                var indexed = await _sessionIndexStore
+                    .FindByIdAsync(new SessionId(sessionId), CancellationToken.None)
+                    .ConfigureAwait(false);
+                sessionLabel = indexed?.Title;
+            }
+            catch (Exception)
+            {
+            }
+
             await _notificationService
-                .ShowAsync(new AgentDeskUserNotification(sessionId, kind), language)
+                .ShowAsync(
+                    new AgentDeskUserNotification(sessionId, kind, sessionLabel),
+                    language)
                 .ConfigureAwait(false);
         }
         catch (Exception)

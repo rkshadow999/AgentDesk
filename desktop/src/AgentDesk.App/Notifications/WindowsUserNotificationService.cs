@@ -198,11 +198,18 @@ public sealed class WindowsAppNotificationRuntime : IWindowsAppNotificationRunti
     public void Show(WindowsNotificationPayload payload)
     {
         ArgumentNullException.ThrowIfNull(payload);
+        // Unique Tag per session so concurrent multi-session completions stack
+        // instead of replacing each other in Action Center.
         var notification = new AppNotificationBuilder()
             .AddText(payload.Title)
             .AddText(payload.Body)
             .AddArgument("sessionId", payload.SessionId)
             .BuildNotification();
+        notification.Tag = TruncateTag(payload.SessionId);
+        notification.Group = "AgentDesk.SessionStatus";
         _manager.Show(notification);
     }
+
+    private static string TruncateTag(string sessionId) =>
+        sessionId.Length <= 64 ? sessionId : sessionId[..64];
 }

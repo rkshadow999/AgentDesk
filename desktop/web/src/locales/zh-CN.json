@@ -196,7 +196,7 @@
   "saveProvider": "保存提供商",
   "desktopPreferencesTitle": "桌面偏好",
   "desktopPreferencesDescription": "管理本机通知与明确启用的实验能力。",
-  "desktopNotificationsEnabled": "启用桌面通知",
+  "desktopNotificationsEnabled": "启用桌面通知（会话完成时提醒，多会话各弹一条）",
   "fontScale": "界面字体大小",
   "fontScale_90": "较小 (90%)",
   "fontScale_100": "标准 (100%)",
