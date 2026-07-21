@@ -277,42 +277,46 @@ export function InspectorSurface({
       </div>
 
       <section className="inspector-content">
-        {state.diffs.length === 0 ? (
-          <div
-            className={`inspector-panel inspector-empty${activeTab === "changes" ? " is-active" : ""}`}
-            role="tabpanel"
-            aria-hidden={activeTab !== "changes"}
-          >
-            {t("noChangesToReview")}
-          </div>
-        ) : (
-          <div
-            className={`inspector-panel changes-layout${activeTab === "changes" ? " is-active" : ""}`}
-            role="tabpanel"
-            aria-hidden={activeTab !== "changes"}
-          >
-            <div className="inspector-file-list" aria-label={t("changedFiles")}>
-              {state.diffs.map((diff) => (
-                <button
-                  key={diff.path}
-                  type="button"
-                  className={`inspector-file${diff.path === effectiveSelectedPath ? " active" : ""}`}
-                  aria-label={diff.path}
-                  onClick={() => setSelectedPath(diff.path)}
-                >
-                  <FileCode2 size={15} />
-                  <span title={diff.path}>{diff.path}</span>
-                </button>
-              ))}
-            </div>
-            <div className="diff-viewer" ref={diffHostRef} aria-label={t("codeDiff")} />
-          </div>
-        )}
+        {/*
+          Keep a single changes panel shell so empty-state classes never fight
+          panel visibility (`.inspector-empty { display:grid }` must stay nested).
+        */}
+        <div
+          className={`inspector-panel changes-pane${
+            state.diffs.length > 0 ? " changes-layout" : ""
+          }${activeTab === "changes" ? " is-active" : ""}`}
+          role="tabpanel"
+          aria-hidden={activeTab !== "changes"}
+          data-testid="inspector-panel-changes"
+        >
+          {state.diffs.length === 0 ? (
+            <div className="inspector-empty">{t("noChangesToReview")}</div>
+          ) : (
+            <>
+              <div className="inspector-file-list" aria-label={t("changedFiles")}>
+                {state.diffs.map((diff) => (
+                  <button
+                    key={diff.path}
+                    type="button"
+                    className={`inspector-file${diff.path === effectiveSelectedPath ? " active" : ""}`}
+                    aria-label={diff.path}
+                    onClick={() => setSelectedPath(diff.path)}
+                  >
+                    <FileCode2 size={15} />
+                    <span title={diff.path}>{diff.path}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="diff-viewer" ref={diffHostRef} aria-label={t("codeDiff")} />
+            </>
+          )}
+        </div>
 
         <div
           className={`inspector-panel terminal-pane${activeTab === "terminal" ? " is-active" : ""}`}
           role="tabpanel"
           aria-hidden={activeTab !== "terminal"}
+          data-testid="inspector-panel-terminal"
         >
           {state.terminalTranscript.characterCount === 0 && (
             <div className="inspector-empty overlay">{t("noTerminalOutput")}</div>
@@ -324,6 +328,7 @@ export function InspectorSurface({
           className={`inspector-panel plan-pane${activeTab === "plan" ? " is-active" : ""}`}
           role="tabpanel"
           aria-hidden={activeTab !== "plan"}
+          data-testid="inspector-panel-plan"
         >
           {state.plan.length === 0 ? (
             <div className="inspector-empty">{t("noPlanGenerated")}</div>

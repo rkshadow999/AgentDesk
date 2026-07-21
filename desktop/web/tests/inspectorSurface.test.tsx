@@ -90,6 +90,32 @@ describe("InspectorSurface", () => {
     expect(terminalTab).toHaveFocus();
   });
 
+  it("hides the changes empty panel when Plan or Terminal is selected", () => {
+    // Regression: nesting empty copy inside the changes panel shell so
+    // `.inspector-empty { display:grid }` cannot un-hide an inactive tab.
+    render(<InspectorSurface bridge={new RecordingBridge()} runtime={new RecordingRuntime()} />);
+
+    const changesPanel = screen.getByTestId("inspector-panel-changes");
+    const planPanel = screen.getByTestId("inspector-panel-plan");
+    const terminalPanel = screen.getByTestId("inspector-panel-terminal");
+    expect(changesPanel).toHaveClass("is-active");
+    expect(screen.getByText("暂无可审阅更改")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "计划" }));
+    expect(screen.getByRole("tab", { name: "计划" })).toHaveAttribute("aria-selected", "true");
+    expect(planPanel).toHaveClass("is-active");
+    expect(changesPanel).not.toHaveClass("is-active");
+    expect(changesPanel).toHaveAttribute("aria-hidden", "true");
+    expect(planPanel).toHaveAttribute("aria-hidden", "false");
+    expect(screen.getByText("当前任务尚未生成计划")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "终端" }));
+    expect(terminalPanel).toHaveClass("is-active");
+    expect(planPanel).not.toHaveClass("is-active");
+    expect(changesPanel).not.toHaveClass("is-active");
+    expect(screen.getByText("暂无终端输出")).toBeInTheDocument();
+  });
+
   it("resets inspector projection when the active session changes", () => {
     const bridge = new RecordingBridge();
     render(<InspectorSurface bridge={bridge} runtime={new RecordingRuntime()} />);
@@ -121,12 +147,12 @@ describe("InspectorSurface", () => {
       content: [{ type: "diff", path: "src/A.cs", oldText: "a", newText: "b" }]
     })));
     expect(screen.getByRole("tab", { name: "更改" })).toHaveAttribute("aria-selected", "true");
-    expect(document.querySelector(".changes-layout")).toHaveClass("is-active");
+    expect(screen.getByTestId("inspector-panel-changes")).toHaveClass("is-active", "changes-layout");
 
     fireEvent.click(screen.getByRole("tab", { name: "终端" }));
     expect(screen.getByRole("tab", { name: "终端" })).toHaveAttribute("aria-selected", "true");
-    expect(document.querySelector(".terminal-pane")).toHaveClass("is-active");
-    expect(document.querySelector(".changes-layout")).not.toHaveClass("is-active");
+    expect(screen.getByTestId("inspector-panel-terminal")).toHaveClass("is-active");
+    expect(screen.getByTestId("inspector-panel-changes")).not.toHaveClass("is-active");
 
     // New diffs must not force the user off the Terminal tab.
     act(() => bridge.emit(sessionUpdate("diff_review", {
@@ -134,7 +160,7 @@ describe("InspectorSurface", () => {
       content: [{ type: "diff", path: "src/B.cs", oldText: "c", newText: "d" }]
     })));
     expect(screen.getByRole("tab", { name: "终端" })).toHaveAttribute("aria-selected", "true");
-    expect(document.querySelector(".terminal-pane")).toHaveClass("is-active");
+    expect(screen.getByTestId("inspector-panel-terminal")).toHaveClass("is-active");
 
     fireEvent.click(screen.getByRole("tab", { name: "计划" }));
     act(() => bridge.emit(sessionUpdate("plan", {
@@ -145,8 +171,8 @@ describe("InspectorSurface", () => {
     })));
     expect(screen.getByRole("tab", { name: "计划" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByText("检查终端面板")).toBeInTheDocument();
-    expect(document.querySelector(".plan-pane")).toHaveClass("is-active");
-    expect(document.querySelector(".changes-layout")).not.toHaveClass("is-active");
+    expect(screen.getByTestId("inspector-panel-plan")).toHaveClass("is-active");
+    expect(screen.getByTestId("inspector-panel-changes")).not.toHaveClass("is-active");
   });
 
   it("mounts Monaco with the selected real diff", async () => {

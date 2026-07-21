@@ -653,29 +653,44 @@ body.sidebar-resizing webview {
 .inspector-tab.active { color: #dce0dd; }
 .inspector-tab.active::after { position: absolute; right: 8px; bottom: -1px; left: 8px; height: 2px; background: var(--accent); content: ""; }
 .inspector-content { position: relative; flex: 1; min-height: 0; overflow: hidden; }
-/* Panels must not rely on HTML [hidden] alone: author `display: grid/flex` overrides UA [hidden]. */
+/*
+ * Panel visibility is controlled only by `.is-active`. Empty-state styling is nested
+ * inside panels so `.inspector-empty { display:grid }` never un-hides an inactive tab.
+ */
 .inspector-panel {
-  display: none;
+  display: none !important;
   width: 100%;
   height: 100%;
   min-width: 0;
   min-height: 0;
 }
 .inspector-panel.is-active {
-  display: block;
+  display: block !important;
 }
 .inspector-panel.is-active.changes-layout {
-  display: grid;
-}
-.inspector-panel.is-active.inspector-empty {
-  display: grid;
+  display: grid !important;
 }
 .inspector-panel.is-active.plan-pane {
-  display: flex;
+  display: flex !important;
   flex-direction: column;
 }
-.inspector-empty { display: grid; min-height: 180px; place-items: center; color: var(--faint); font-size: 1.1rem; }
-.inspector-empty.overlay { position: absolute; inset: 0; z-index: 1; min-height: 0; pointer-events: none; }
+.inspector-panel.is-active.terminal-pane {
+  display: block !important;
+}
+.inspector-empty {
+  display: grid;
+  min-height: 180px;
+  place-items: center;
+  color: var(--faint);
+  font-size: 1.1rem;
+}
+.inspector-empty.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  min-height: 0;
+  pointer-events: none;
+}
 .changes-layout { grid-template-columns: minmax(120px, 34%) minmax(0, 1fr); }
 .inspector-file-list { min-width: 0; overflow: auto; padding: 7px; border-right: 1px solid var(--border); }
 .inspector-file { display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: center; width: 100%; min-height: 38px; padding: 5px 7px; border: 1px solid transparent; border-radius: 5px; text-align: left; background: transparent; cursor: pointer; }
@@ -683,8 +698,8 @@ body.sidebar-resizing webview {
 .inspector-file.active { background: #29322e; border-color: #3a4a43; }
 .inspector-file > svg { color: #87918b; }
 .inspector-file > span { overflow: hidden; color: #d4d8d5; font-size: 1rem; text-overflow: ellipsis; white-space: nowrap; }
-.diff-viewer, .terminal-viewer, .terminal-pane { width: 100%; height: 100%; min-width: 0; min-height: 0; }
-.terminal-pane { position: relative; background: var(--surface-0); }
+.diff-viewer, .terminal-viewer { width: 100%; height: 100%; min-width: 0; min-height: 0; }
+.terminal-pane { position: relative; width: 100%; height: 100%; min-width: 0; min-height: 0; background: var(--surface-0); }
 .terminal-viewer { padding: 9px 8px; }
 .terminal-viewer .xterm { height: 100%; }
 .plan-pane { min-height: 0; overflow: hidden; background: var(--surface-1); }

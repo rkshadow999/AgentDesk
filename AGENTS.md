@@ -1,7 +1,7 @@
 # AgentDesk — 给开源用户与贡献者的说明
 
 > 仓库：[github.com/rkshadow999/AgentDesk](https://github.com/rkshadow999/AgentDesk)  
-> 当前公开预览版本：**0.1.0-alpha.8**（Windows 11 x64）  
+> 当前公开预览版本：**0.1.0-alpha.9**（Windows 11 x64）  
 > 更新时间：2026-07-21
 
 本文面向两类读者：
@@ -21,7 +21,7 @@ AgentDesk 目前提供 **社区自托管的 Windows 预览包**（Inno Setup 安
 | 方式 | 链接 |
 | --- | --- |
 | **下载页（推荐先打开这里）** | https://update.rkshadow.com/install/ |
-| **Windows Setup.exe**（无需管理员，默认装到 `%LOCALAPPDATA%\AgentDesk`） | https://update.rkshadow.com/install/AgentDesk-0.1.0-alpha.8-win-x64-Setup.exe |
+| **Windows Setup.exe**（无需管理员，默认装到 `%LOCALAPPDATA%\AgentDesk`） | https://update.rkshadow.com/install/AgentDesk-0.1.0-alpha.9-win-x64-Setup.exe |
 | **Portable zip**（解压即用） | https://update.rkshadow.com/install/AgentDesk-latest-win-x64-portable.zip |
 | **自动更新 Feed**（客户端内置） | https://update.rkshadow.com/feed/ |
 
@@ -60,7 +60,7 @@ SHA-256(c9b3ccf2dd92519a17720056dc43c1f3bb55f4652a1d99e68f99160657611e37)
 
 | 你手里的包 | 建议 |
 | --- | --- |
-| 含自托管公钥的 alpha.6 selfhost / alpha.7 | 设置中检查更新 → 升到 **alpha.8** |
+| 含自托管公钥的 alpha.6 selfhost / alpha.7 / alpha.8 | 设置中检查更新 → 升到 **alpha.9** |
 | 更早的 `alpha.6-fixed` 等**不含新公钥**的包 | **无法校验** `update.rkshadow.com` 清单 → 请重新下载上面的 Setup / Portable |
 
 ---
@@ -74,7 +74,7 @@ SHA-256(c9b3ccf2dd92519a17720056dc43c1f3bb55f4652a1d99e68f99160657611e37)
 | 会话中心 | 新建会话、打开会话、重命名、归档等（以 UI 实际暴露为准） |
 | **多会话切换 UX** | 运行中切换会弹出确认（中断当前 turn 后切换）；侧栏有明确「打开」操作 |
 | **会话线程本地缓存** | 切换会话时尽量保留本机投影的对话气泡（不是云端完整历史） |
-| 检查器（变更 / 终端 / 计划） | 按会话绑定；标签页显示修复（CSS `[hidden]` vs `display`） |
+| 检查器（变更 / 终端 / 计划） | 按会话绑定；**alpha.9** 修复：空「更改」面板不再盖住「计划/终端」（标签可切换） |
 | 原生执行风险确认 | 首次本机执行需确认；**同一工作区**内可复用确认 |
 | 完全访问 / 字体缩放 / 检查器宽度 | 见设置与桌面控件；完全访问有独立原生确认 |
 | Portable 签名校验更新 | 见上一节 |
