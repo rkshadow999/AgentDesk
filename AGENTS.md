@@ -1,7 +1,7 @@
 # AgentDesk — 给开源用户与贡献者的说明
 
 > 仓库：[github.com/rkshadow999/AgentDesk](https://github.com/rkshadow999/AgentDesk)  
-> 当前公开预览版本：**0.1.0-alpha.9**（Windows 11 x64）  
+> 当前公开预览版本：**0.1.0-alpha.10**（Windows 11 x64）  
 > 更新时间：2026-07-21
 
 本文面向两类读者：
@@ -21,7 +21,7 @@ AgentDesk 目前提供 **社区自托管的 Windows 预览包**（Inno Setup 安
 | 方式 | 链接 |
 | --- | --- |
 | **下载页（推荐先打开这里）** | https://update.rkshadow.com/install/ |
-| **Windows Setup.exe**（无需管理员，默认装到 `%LOCALAPPDATA%\AgentDesk`） | https://update.rkshadow.com/install/AgentDesk-0.1.0-alpha.9-win-x64-Setup.exe |
+| **Windows Setup.exe**（无需管理员，默认装到 `%LOCALAPPDATA%\AgentDesk`） | https://update.rkshadow.com/install/AgentDesk-0.1.0-alpha.10-win-x64-Setup.exe |
 | **Portable zip**（解压即用） | https://update.rkshadow.com/install/AgentDesk-latest-win-x64-portable.zip |
 | **自动更新 Feed**（客户端内置） | https://update.rkshadow.com/feed/ |
 
@@ -60,21 +60,29 @@ SHA-256(c9b3ccf2dd92519a17720056dc43c1f3bb55f4652a1d99e68f99160657611e37)
 
 | 你手里的包 | 建议 |
 | --- | --- |
-| 含自托管公钥的 alpha.6 selfhost / alpha.7 / alpha.8 | 设置中检查更新 → 升到 **alpha.9** |
+| 含自托管公钥的 alpha.6 selfhost / alpha.7–alpha.9 | 设置中检查更新 → 升到 **alpha.10** |
 | 更早的 `alpha.6-fixed` 等**不含新公钥**的包 | **无法校验** `update.rkshadow.com` 清单 → 请重新下载上面的 Setup / Portable |
+
+### 版本号约定（开源用户 / 维护者）
+
+- **每次对外发布必须递增版本**（更新清单按版本比较；重复版本无法触发升级）。
+- 当前阶段使用 **预发布号** `0.1.0-alpha.N`：`N` 每发一包 **+1**（小步迭代，不涨主版本）。
+- 将来若有破坏性变更或不兼容更新通道，再考虑 `0.2.0` / `1.0.0` 等主/次版本。
+- 客户端比较的是 **InformationalVersion**（如 `0.1.0-alpha.10`），不是仅看文件版本 `0.1.0.0`。
 
 ---
 
-## 2. 当前 alpha.9 已交付的能力（用户可感知）
+## 2. 当前 alpha.10 已交付的能力（用户可感知）
 
 | 能力 | 说明 |
 | --- | --- |
 | 中文优先桌面 UI + 英文切换 | Web 文案即时切换；部分原生字符串可能需重启 |
+| **应用图标（RK 品牌）** | exe / 开始菜单 / Setup 向导 / 桌面快捷方式使用统一 `.ico` 与磁贴 PNG |
 | 工作区选择 / 最近工作区 | 本地持久化最近路径，侧栏可切换、添加、移除 |
 | 会话中心 | 新建会话、打开会话、重命名、归档等（以 UI 实际暴露为准） |
 | **多会话切换 UX** | 运行中切换会弹出确认（中断当前 turn 后切换）；侧栏有明确「打开」操作 |
 | **会话线程本地缓存** | 切换会话时尽量保留本机投影的对话气泡（不是云端完整历史） |
-| 检查器（变更 / 终端 / 计划） | 按会话绑定；**alpha.9** 修复：空「更改」面板不再盖住「计划/终端」（标签可切换） |
+| 检查器（变更 / 终端 / 计划） | 按会话绑定；**alpha.9+** 修复：空「更改」面板不再盖住「计划/终端」 |
 | 原生执行风险确认 | 首次本机执行需确认；**同一工作区**内可复用确认 |
 | 完全访问 / 字体缩放 / 检查器宽度 | 见设置与桌面控件；完全访问有独立原生确认 |
 | Portable 签名校验更新 | 见上一节 |
@@ -156,8 +164,8 @@ $env:DOTNET_ROOT = "$env:USERPROFILE\.dotnet"
 $env:PATH = "$env:USERPROFILE\.dotnet;C:\Program Files\PowerShell\7;" + $env:PATH
 
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\agentdesk\Publish-AgentDeskSelfHostedUpdate.ps1 `
-  -Version "0.1.0-alpha.9" `
-  -ReleaseDirectory ".\artifacts\release-alpha.9-selfhost\AgentDesk-0.1.0-alpha.9-win-x64"
+  -Version "0.1.0-alpha.10" `
+  -ReleaseDirectory ".\artifacts\release-alpha.10-selfhost\AgentDesk-0.1.0-alpha.10-win-x64"
 ```
 
 发布产物目录（本机，已 gitignore）：`artifacts/release-alpha.*`、`artifacts/selfhosted-feed/`。
@@ -169,6 +177,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\agentdesk\Publish-AgentD
 - **桌面宿主**：最近工作区持久化、会话 open/new 与 supersede 协作、自托管更新默认 feed 与公钥 pin。
 - **Workbench（React）**：会话线程缓存、运行中切换确认、侧栏拖拽宽度、首轮发送/流式在 session 绑定前可绘制、`prompt/completed` 正确解锁输入。
 - **Inspector**：会话绑定与活动标签显示修复。
+- **品牌图标**：`desktop/src/AgentDesk.App/Assets/AgentDesk-icon-source.png` → 运行 `Generate-AppAssets.ps1` 生成 `AgentDesk.ico` 与各尺寸磁贴 PNG；`ApplicationIcon` 与 Inno `SetupIconFile` 已接入。
 - **打包**：Inno Setup 安装包 + 签名 Portable 更新通道。
 
 ---

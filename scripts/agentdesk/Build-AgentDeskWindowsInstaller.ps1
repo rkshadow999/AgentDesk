@@ -90,6 +90,17 @@ if ($null -ne $iscc) {
 
     $sourceDirEscaped = $sourceDir -replace '\\', '\\'
     $outRootEscaped = $outRoot -replace '\\', '\\'
+
+    $iconCandidates = @(
+        (Join-Path $sourceDir "AgentDesk.ico"),
+        (Join-Path $sourceDir "Assets\AgentDesk.ico"),
+        (Join-Path $PSScriptRoot "..\..\desktop\src\AgentDesk.App\Assets\AgentDesk.ico")
+    )
+    $setupIcon = $iconCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    $setupIconEscaped = if ($setupIcon) { ($setupIcon -replace '\\', '\\') } else { "" }
+    $setupIconLine = if ($setupIconEscaped) { "SetupIconFile=$setupIconEscaped" } else { "" }
+    $uninstallIcon = if ($setupIcon) { "{app}\AgentDesk.ico" } else { "{app}\{#MyAppExeName}" }
+
     $iss = @"
 #define MyAppName "$AppName"
 #define MyAppVersion "$Version"
@@ -116,9 +127,10 @@ WizardStyle=modern
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-UninstallDisplayIcon={app}\{#MyAppExeName}
+UninstallDisplayIcon=$uninstallIcon
 VersionInfoVersion=$numericVersion
 SetupLogging=yes
+$setupIconLine
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -131,8 +143,8 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 Source: "$sourceDirEscaped\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\AgentDesk.ico"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\AgentDesk.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "启动 AgentDesk"; Flags: nowait postinstall skipifsilent

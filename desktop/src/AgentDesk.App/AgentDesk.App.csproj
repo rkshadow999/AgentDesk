@@ -6,6 +6,7 @@
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
     <RootNamespace>AgentDesk.App</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\AgentDesk.ico</ApplicationIcon>
     <Platforms>x64;ARM64</Platforms>
     <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <PlatformTarget Condition="'$(Platform)' == 'x64'">x64</PlatformTarget>
@@ -78,9 +79,18 @@
     <Compile Remove="tests\**\*.cs" />
     <Content Remove="Assets\AgentDesk.svg" />
     <Content Remove="Assets\Generate-AppAssets.ps1" />
+    <Content Remove="Assets\AgentDesk-icon-source.png" />
     <Content Remove="tests\**\*" />
     <EmbeddedResource Remove="tests\**\*" />
     <None Remove="tests\**\*" />
+  </ItemGroup>
+
+  <!-- Ship multi-size icon next to the portable exe for shortcuts / Inno. -->
+  <ItemGroup>
+    <Content Include="Assets\AgentDesk.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
 
   <Target Name="AgentDeskCopyCompiledXamlToPublish"

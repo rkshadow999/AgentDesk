@@ -1,33 +1,27 @@
+<#
+.SYNOPSIS
+Generates AgentDesk PNG tile assets and a multi-size .ico from the branded
+RK source image (AgentDesk-icon-source.png).
+#>
 param(
-    [string]$OutputDirectory = $PSScriptRoot
+    [string]$OutputDirectory = $PSScriptRoot,
+    [string]$SourceImagePath = (Join-Path $PSScriptRoot "AgentDesk-icon-source.png")
 )
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
 
-function New-RoundedRectangle {
-    param(
-        [System.Drawing.RectangleF]$Bounds,
-        [float]$Radius
-    )
-
-    $diameter = $Radius * 2
-    $path = [System.Drawing.Drawing2D.GraphicsPath]::new()
-    $path.AddArc($Bounds.Left, $Bounds.Top, $diameter, $diameter, 180, 90)
-    $path.AddArc($Bounds.Right - $diameter, $Bounds.Top, $diameter, $diameter, 270, 90)
-    $path.AddArc($Bounds.Right - $diameter, $Bounds.Bottom - $diameter, $diameter, $diameter, 0, 90)
-    $path.AddArc($Bounds.Left, $Bounds.Bottom - $diameter, $diameter, $diameter, 90, 90)
-    $path.CloseFigure()
-    return $path
+if (-not (Test-Path -LiteralPath $SourceImagePath)) {
+    throw "Source icon image not found: $SourceImagePath"
 }
 
-function Write-AgentDeskAsset {
+function New-ScaledBitmap {
     param(
-        [string]$FileName,
+        [System.Drawing.Image]$Source,
         [int]$Width,
         [int]$Height,
-        [int]$IconSize
+        [switch]$Contain
     )
 
     $bitmap = [System.Drawing.Bitmap]::new(
@@ -35,79 +29,148 @@ function Write-AgentDeskAsset {
         $Height,
         [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-
     try {
         $graphics.Clear([System.Drawing.Color]::Transparent)
-        $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $graphics.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceOver
+        $graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
         $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
 
-        $originX = ($Width - $IconSize) / 2.0
-        $originY = ($Height - $IconSize) / 2.0
-        $scale = $IconSize / 256.0
-        $bounds = [System.Drawing.RectangleF]::new(
-            [float]$originX,
-            [float]$originY,
-            [float]$IconSize,
-            [float]$IconSize)
-        $backgroundPath = New-RoundedRectangle $bounds ([float](48 * $scale))
-        $backgroundBrush = [System.Drawing.SolidBrush]::new(
-            [System.Drawing.ColorTranslator]::FromHtml('#181818'))
-        $whiteBrush = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::White)
-        $greenBrush = [System.Drawing.SolidBrush]::new(
-            [System.Drawing.ColorTranslator]::FromHtml('#38A169'))
-
-        try {
-            $graphics.FillPath($backgroundBrush, $backgroundPath)
-
-            $outerA = [System.Drawing.PointF[]]@(
-                [System.Drawing.PointF]::new($originX + (62 * $scale), $originY + (181 * $scale)),
-                [System.Drawing.PointF]::new($originX + (111 * $scale), $originY + (62 * $scale)),
-                [System.Drawing.PointF]::new($originX + (146 * $scale), $originY + (62 * $scale)),
-                [System.Drawing.PointF]::new($originX + (195 * $scale), $originY + (181 * $scale)),
-                [System.Drawing.PointF]::new($originX + (161 * $scale), $originY + (181 * $scale)),
-                [System.Drawing.PointF]::new($originX + (151 * $scale), $originY + (154 * $scale)),
-                [System.Drawing.PointF]::new($originX + (103 * $scale), $originY + (154 * $scale)),
-                [System.Drawing.PointF]::new($originX + (93 * $scale), $originY + (181 * $scale)))
-            $graphics.FillPolygon($whiteBrush, $outerA)
-
-            $counter = [System.Drawing.PointF[]]@(
-                [System.Drawing.PointF]::new($originX + (127 * $scale), $originY + (87 * $scale)),
-                [System.Drawing.PointF]::new($originX + (113 * $scale), $originY + (125 * $scale)),
-                [System.Drawing.PointF]::new($originX + (141 * $scale), $originY + (125 * $scale)))
-            $graphics.FillPolygon($backgroundBrush, $counter)
-
-            $accentBounds = [System.Drawing.RectangleF]::new(
-                [float]($originX + (178 * $scale)),
-                [float]($originY + (62 * $scale)),
-                [float](18 * $scale),
-                [float](68 * $scale))
-            $accentPath = New-RoundedRectangle $accentBounds ([float](9 * $scale))
-            try {
-                $graphics.FillPath($greenBrush, $accentPath)
-            }
-            finally {
-                $accentPath.Dispose()
-            }
-
-            $path = Join-Path $OutputDirectory $FileName
-            $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+        if ($Contain) {
+            $scale = [Math]::Min($Width / [double]$Source.Width, $Height / [double]$Source.Height)
+            $drawW = [int][Math]::Round($Source.Width * $scale)
+            $drawH = [int][Math]::Round($Source.Height * $scale)
+            $x = [int](($Width - $drawW) / 2)
+            $y = [int](($Height - $drawH) / 2)
+            $dest = [System.Drawing.Rectangle]::new($x, $y, $drawW, $drawH)
+            $graphics.DrawImage($Source, $dest)
         }
-        finally {
-            $backgroundPath.Dispose()
-            $backgroundBrush.Dispose()
-            $whiteBrush.Dispose()
-            $greenBrush.Dispose()
+        else {
+            $dest = [System.Drawing.Rectangle]::new(0, 0, $Width, $Height)
+            $graphics.DrawImage($Source, $dest)
         }
     }
     finally {
         $graphics.Dispose()
+    }
+    return $bitmap
+}
+
+function Write-PngAsset {
+    param(
+        [System.Drawing.Image]$Source,
+        [string]$FileName,
+        [int]$Width,
+        [int]$Height,
+        [switch]$Contain
+    )
+
+    $path = Join-Path $OutputDirectory $FileName
+    $bitmap = New-ScaledBitmap -Source $Source -Width $Width -Height $Height -Contain:$Contain
+    try {
+        $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+        Write-Host "Wrote $path ($Width x $Height)"
+    }
+    finally {
         $bitmap.Dispose()
     }
 }
 
+function Write-MultiSizeIco {
+    param(
+        [System.Drawing.Image]$Source,
+        [string]$FileName,
+        [int[]]$Sizes = @(16, 24, 32, 48, 64, 128, 256)
+    )
+
+    $path = Join-Path $OutputDirectory $FileName
+    $pngChunks = New-Object System.Collections.Generic.List[byte[]]
+    foreach ($size in $Sizes) {
+        $bmp = New-ScaledBitmap -Source $Source -Width $size -Height $size
+        try {
+            $ms = New-Object System.IO.MemoryStream
+            $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+            $pngChunks.Add($ms.ToArray()) | Out-Null
+            $ms.Dispose()
+        }
+        finally {
+            $bmp.Dispose()
+        }
+    }
+
+    $count = $pngChunks.Count
+    $headerSize = 6
+    $dirEntrySize = 16
+    $offset = $headerSize + ($dirEntrySize * $count)
+
+    $fs = [System.IO.File]::Create($path)
+    try {
+        $bw = New-Object System.IO.BinaryWriter $fs
+        # ICONDIR
+        $bw.Write([uint16]0)      # reserved
+        $bw.Write([uint16]1)      # type = icon
+        $bw.Write([uint16]$count) # count
+
+        $dataOffset = $offset
+        for ($i = 0; $i -lt $count; $i++) {
+            $size = $Sizes[$i]
+            $bytes = $pngChunks[$i]
+            $w = if ($size -ge 256) { 0 } else { $size }
+            $h = if ($size -ge 256) { 0 } else { $size }
+            $bw.Write([byte]$w)
+            $bw.Write([byte]$h)
+            $bw.Write([byte]0)   # color count
+            $bw.Write([byte]0)   # reserved
+            $bw.Write([uint16]1) # planes
+            $bw.Write([uint16]32) # bit count
+            $bw.Write([uint32]$bytes.Length)
+            $bw.Write([uint32]$dataOffset)
+            $dataOffset += $bytes.Length
+        }
+
+        foreach ($bytes in $pngChunks) {
+            $bw.Write($bytes)
+        }
+        $bw.Flush()
+    }
+    finally {
+        $fs.Dispose()
+    }
+    Write-Host "Wrote $path (sizes: $($Sizes -join ', '))"
+}
+
 [System.IO.Directory]::CreateDirectory($OutputDirectory) | Out-Null
-Write-AgentDeskAsset 'StoreLogo.png' 50 50 50
-Write-AgentDeskAsset 'Square44x44Logo.png' 44 44 44
-Write-AgentDeskAsset 'Square150x150Logo.png' 150 150 150
-Write-AgentDeskAsset 'Wide310x150Logo.png' 310 150 150
-Write-AgentDeskAsset 'Square310x310Logo.png' 310 310 310
+$source = [System.Drawing.Image]::FromFile((Resolve-Path -LiteralPath $SourceImagePath).Path)
+try {
+    Write-PngAsset -Source $source -FileName "StoreLogo.png" -Width 50 -Height 50
+    Write-PngAsset -Source $source -FileName "Square44x44Logo.png" -Width 44 -Height 44
+    Write-PngAsset -Source $source -FileName "Square150x150Logo.png" -Width 150 -Height 150
+    Write-PngAsset -Source $source -FileName "Square310x310Logo.png" -Width 310 -Height 310
+    # Wide tile: dark canvas with centered brand mark
+    $wide = [System.Drawing.Bitmap]::new(310, 150, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = [System.Drawing.Graphics]::FromImage($wide)
+    try {
+        $g.Clear([System.Drawing.ColorTranslator]::FromHtml("#0B0E14"))
+        $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+        $mark = 128
+        $x = [int]((310 - $mark) / 2)
+        $y = [int]((150 - $mark) / 2)
+        $g.DrawImage($source, [System.Drawing.Rectangle]::new($x, $y, $mark, $mark))
+        $widePath = Join-Path $OutputDirectory "Wide310x150Logo.png"
+        $wide.Save($widePath, [System.Drawing.Imaging.ImageFormat]::Png)
+        Write-Host "Wrote $widePath (310 x 150)"
+    }
+    finally {
+        $g.Dispose()
+        $wide.Dispose()
+    }
+
+    Write-MultiSizeIco -Source $source -FileName "AgentDesk.ico"
+    # High-res PNG for docs / installer wizard
+    Write-PngAsset -Source $source -FileName "AgentDesk-256.png" -Width 256 -Height 256
+}
+finally {
+    $source.Dispose()
+}
