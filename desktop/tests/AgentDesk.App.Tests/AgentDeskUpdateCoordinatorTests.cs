@@ -104,7 +104,7 @@ public sealed class AgentDeskUpdateCoordinatorTests : IDisposable
         try
         {
             Assert.Equal(
-                "a7350091fed6493ac0aa0d6222b4f2e0b80eb365c70fcf89d9040276e47b6e15",
+                "c9b3ccf2dd92519a17720056dc43c1f3bb55f4652a1d99e68f99160657611e37",
                 Convert.ToHexStringLower(SHA256.HashData(key)));
             using var ecdsa = ECDsa.Create();
             ecdsa.ImportSubjectPublicKeyInfo(key, out var bytesRead);
@@ -118,7 +118,7 @@ public sealed class AgentDeskUpdateCoordinatorTests : IDisposable
     }
 
     [Fact]
-    public void DefaultsUseTheStableFeedForAStableInstallation()
+    public void DefaultsUseTheSelfHostedFeedForAStableInstallation()
     {
         var options = AgentDeskUpdateDefaults.Create(
             SemanticVersion.Parse("1.2.3"),
@@ -128,25 +128,25 @@ public sealed class AgentDeskUpdateCoordinatorTests : IDisposable
             ["--workspace", "C:\\repo"]);
 
         Assert.Equal(
-            "https://github.com/rkshadow999/AgentDesk/releases/download/update-stable/AgentDesk-updater-manifest.json",
+            "https://update.rkshadow.com/feed/AgentDesk-updater-manifest.json",
             options.UpdaterManifestUri.AbsoluteUri);
         Assert.Equal(
-            "https://github.com/rkshadow999/AgentDesk/releases/download/update-stable/AgentDesk-updater-manifest.json.sig",
+            "https://update.rkshadow.com/feed/AgentDesk-updater-manifest.json.sig",
             options.UpdaterSignatureUri.AbsoluteUri);
         Assert.Equal(
-            "https://github.com/rkshadow999/AgentDesk/releases/download/update-stable/AgentDesk-update-manifest.json",
+            "https://update.rkshadow.com/feed/AgentDesk-update-manifest.json",
             options.ApplicationManifestUri.AbsoluteUri);
         Assert.Equal(
-            "https://github.com/rkshadow999/AgentDesk/releases/download/update-stable/AgentDesk-update-manifest.json.sig",
+            "https://update.rkshadow.com/feed/AgentDesk-update-manifest.json.sig",
             options.ApplicationSignatureUri.AbsoluteUri);
         Assert.Equal(UpdateArchitecture.Arm64, options.Architecture);
         Assert.Equal(SemanticVersion.Parse("1.2.3"), options.InstalledVersion);
-        Assert.False(options.AllowPrerelease);
+        Assert.True(options.AllowPrerelease);
         Assert.Equal(new[] { "--workspace", "C:\\repo" }, options.RestartArguments);
     }
 
     [Fact]
-    public void DefaultsUseThePrereleaseFeedForAPrereleaseInstallation()
+    public void DefaultsUseTheSelfHostedFeedForAPrereleaseInstallation()
     {
         var options = AgentDeskUpdateDefaults.Create(
             SemanticVersion.Parse("1.2.3-alpha.1"),
@@ -156,16 +156,16 @@ public sealed class AgentDeskUpdateCoordinatorTests : IDisposable
             []);
 
         Assert.Equal(
-            "https://github.com/rkshadow999/AgentDesk/releases/download/update-prerelease/AgentDesk-updater-manifest.json",
+            "https://update.rkshadow.com/feed/AgentDesk-updater-manifest.json",
             options.UpdaterManifestUri.AbsoluteUri);
         Assert.Equal(
-            "https://github.com/rkshadow999/AgentDesk/releases/download/update-prerelease/AgentDesk-updater-manifest.json.sig",
+            "https://update.rkshadow.com/feed/AgentDesk-updater-manifest.json.sig",
             options.UpdaterSignatureUri.AbsoluteUri);
         Assert.Equal(
-            "https://github.com/rkshadow999/AgentDesk/releases/download/update-prerelease/AgentDesk-update-manifest.json",
+            "https://update.rkshadow.com/feed/AgentDesk-update-manifest.json",
             options.ApplicationManifestUri.AbsoluteUri);
         Assert.Equal(
-            "https://github.com/rkshadow999/AgentDesk/releases/download/update-prerelease/AgentDesk-update-manifest.json.sig",
+            "https://update.rkshadow.com/feed/AgentDesk-update-manifest.json.sig",
             options.ApplicationSignatureUri.AbsoluteUri);
         Assert.True(options.AllowPrerelease);
     }

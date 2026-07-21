@@ -92,10 +92,21 @@ export function reduceInspectorEvent(
   state: InspectorState,
   event: HostEvent
 ): InspectorState {
+  // Bind inspector projection to the focused engine session so rapid thread
+  // switches never leave stale diffs/terminal/plan from the previous turn.
+  if (event.type === "session/active/changed") {
+    if (!state.sessionId || event.sessionId !== state.sessionId) {
+      return createInitialInspectorState(event.sessionId);
+    }
+    return state;
+  }
+
   if (event.type === "engine/status") {
     if (event.sessionId &&
-        (event.status === "starting" || event.status === "running") &&
-        event.sessionId !== state.sessionId) {
+        event.sessionId !== state.sessionId &&
+        (event.status === "starting" ||
+          event.status === "running" ||
+          event.status === "ready")) {
       return createInitialInspectorState(event.sessionId);
     }
     return event.sessionId && !state.sessionId ? { ...state, sessionId: event.sessionId } : state;

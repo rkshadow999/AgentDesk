@@ -24,10 +24,10 @@ public sealed class AgentDeskUpdateOptions
         ArgumentNullException.ThrowIfNull(applicationManifestUri);
         ArgumentNullException.ThrowIfNull(applicationSignatureUri);
         ArgumentNullException.ThrowIfNull(restartArguments);
-        UpdateOriginPolicy.GitHub.EnsureAllowedInitialUri(updaterManifestUri);
-        UpdateOriginPolicy.GitHub.EnsureAllowedInitialUri(updaterSignatureUri);
-        UpdateOriginPolicy.GitHub.EnsureAllowedInitialUri(applicationManifestUri);
-        UpdateOriginPolicy.GitHub.EnsureAllowedInitialUri(applicationSignatureUri);
+        UpdateOriginPolicy.Default.EnsureAllowedInitialUri(updaterManifestUri);
+        UpdateOriginPolicy.Default.EnsureAllowedInitialUri(updaterSignatureUri);
+        UpdateOriginPolicy.Default.EnsureAllowedInitialUri(applicationManifestUri);
+        UpdateOriginPolicy.Default.EnsureAllowedInitialUri(applicationSignatureUri);
         if (publicKeySubjectPublicKeyInfo.Length is < 32 or > 1024)
         {
             throw new UpdateSecurityException("The pinned update public key size is invalid.");
@@ -341,7 +341,7 @@ public sealed class AgentDeskUpdateCoordinator : IAgentDeskUpdateChecker, IDispo
 
 public sealed class AgentDeskPortableUpdateStager : IAgentDeskUpdateStager, IDisposable
 {
-    private readonly PortableUpdateService _service = new(UpdateOriginPolicy.GitHub);
+    private readonly PortableUpdateService _service = new(UpdateOriginPolicy.Default);
 
     public Task<StagedUpdate?> CheckAndStageAsync(
         UpdateCheckRequest request,

@@ -163,6 +163,10 @@ public static class WebMessageProtocol
                     RequiredMaintenanceRequestId(root)),
                 "attachment/discard" => ParseDiscardImageAttachments(root),
                 "workspace/select" => new SelectWorkspaceWebCommand(),
+                "workspace/recent/open" => new OpenRecentWorkspaceWebCommand(
+                    RequiredString(root, "path")),
+                "workspace/recent/remove" => new RemoveRecentWorkspaceWebCommand(
+                    RequiredString(root, "path")),
                 "workspace/context/instructions/list" =>
                     new WorkspaceInstructionsListWebCommand(
                         RequiredWorkspaceContextRequestId(root),
@@ -184,6 +188,7 @@ public static class WebMessageProtocol
                 "provider/save" => ParseProvider(root),
                 "session/list" => ParseSessionList(root),
                 "session/open" => ParseSessionOpen(root),
+                "session/new" => ParseSessionNew(root),
                 "session/rename" => ParseSessionRename(root),
                 "session/archive" => ParseSessionArchive(root),
                 "session/fork" => ParseSessionFork(root),
@@ -345,6 +350,12 @@ public static class WebMessageProtocol
                 type = "workspace/selected",
                 value.Path,
                 value.WorkspaceGeneration,
+            },
+            RecentWorkspacesChangedWebEvent value => new
+            {
+                schemaVersion = SchemaVersion,
+                type = "workspace/recent/changed",
+                paths = value.Paths,
             },
             WorkspaceInstructionsListWebEvent value =>
                 ProjectWorkspaceContextFiles(
@@ -2756,6 +2767,9 @@ public static class WebMessageProtocol
         RequiredString(root, "workspacePath"),
         ParseExecutionProfile(RequiredString(root, "executionProfile")));
 
+    private static SessionNewWebCommand ParseSessionNew(JsonElement root) => new(
+        ParseExecutionProfile(RequiredString(root, "executionProfile")));
+
     private static SessionRenameWebCommand ParseSessionRename(JsonElement root) => new(
         RequiredMaintenanceRequestId(root),
         RequiredString(root, "sessionId"),
@@ -3081,6 +3095,8 @@ public static class WebMessageProtocol
             "attachment/select" => ["requestId"],
             "attachment/discard" => ["tokens"],
             "workspace/select" => [],
+            "workspace/recent/open" => ["path"],
+            "workspace/recent/remove" => ["path"],
             "workspace/context/instructions/list" =>
                 ["requestId", "workspaceGeneration"],
             "workspace/context/file/read" =>
@@ -3096,6 +3112,7 @@ public static class WebMessageProtocol
                 ],
             "session/list" => ["requestId", "query", "cursor", "limit", "archived"],
             "session/open" => ["sessionId", "workspacePath", "executionProfile"],
+            "session/new" => ["executionProfile"],
             "session/rename" => ["requestId", "sessionId", "title", "workspacePath"],
             "session/archive" => ["requestId", "sessionId", "archived"],
             "session/fork" =>
@@ -4193,6 +4210,10 @@ public sealed record SaveUiPreferencesWebCommand(UiPreferences Preferences) : We
 
 public sealed record SelectWorkspaceWebCommand : WebCommand;
 
+public sealed record OpenRecentWorkspaceWebCommand(string Path) : WebCommand;
+
+public sealed record RemoveRecentWorkspaceWebCommand(string Path) : WebCommand;
+
 public sealed record SaveProviderWebCommand(
     ProviderProfile Profile,
     bool UseExistingCredential,
@@ -4222,6 +4243,9 @@ public sealed record SessionListWebCommand(
 public sealed record SessionOpenWebCommand(
     string SessionId,
     string WorkspacePath,
+    ExecutionProfile ExecutionProfile) : WebCommand;
+
+public sealed record SessionNewWebCommand(
     ExecutionProfile ExecutionProfile) : WebCommand;
 
 public sealed record SessionRenameWebCommand(
@@ -4405,6 +4429,8 @@ public sealed record EngineStatusWebEvent(
     : WebEvent;
 
 public sealed record WorkspaceSelectedWebEvent(string Path, int WorkspaceGeneration) : WebEvent;
+
+public sealed record RecentWorkspacesChangedWebEvent(IReadOnlyList<string> Paths) : WebEvent;
 
 public sealed record EngineCapabilitiesChangedWebEvent(
     string SessionId,

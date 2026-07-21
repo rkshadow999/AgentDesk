@@ -9,8 +9,9 @@
 
     <Grid
         x:Name="RootGrid"
-        Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
-        Loaded="RootGrid_Loaded">
+        Background="{ThemeResource AgentDeskSurfaceBrush}"
+        Loaded="RootGrid_Loaded"
+        RequestedTheme="Dark">
         <Grid.RowDefinitions>
             <RowDefinition Height="48" />
             <RowDefinition Height="*" />
@@ -92,7 +93,7 @@
             <WebView2
                 x:Name="WorkbenchWebView"
                 Grid.Column="0"
-                DefaultBackgroundColor="Transparent" />
+                DefaultBackgroundColor="#FF181A19" />
 
             <Thumb
                 x:Name="InspectorSplitter"
@@ -101,7 +102,7 @@
                 Width="8"
                 HorizontalAlignment="Stretch"
                 AutomationProperties.AutomationId="InspectorPaneSplitter"
-                Background="Transparent"
+                Background="{ThemeResource AgentDeskSurfaceBrush}"
                 DoubleTapped="InspectorSplitter_DoubleTapped"
                 DragCompleted="InspectorSplitter_DragCompleted"
                 DragDelta="InspectorSplitter_DragDelta"
@@ -123,12 +124,12 @@
             <WebView2
                 x:Name="InspectorWebView"
                 Grid.Column="2"
-                DefaultBackgroundColor="Transparent" />
+                DefaultBackgroundColor="#FF181A19" />
 
             <Grid
                 x:Name="LoadingPanel"
                 Grid.ColumnSpan="3"
-                Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+                Background="{ThemeResource AgentDeskSurfaceBrush}">
                 <StackPanel
                     HorizontalAlignment="Center"
                     VerticalAlignment="Center"
@@ -148,7 +149,7 @@
                 x:Name="ErrorPanel"
                 Grid.ColumnSpan="3"
                 Padding="32"
-                Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
+                Background="{ThemeResource AgentDeskSurfaceBrush}"
                 Visibility="Collapsed">
                 <StackPanel
                     MaxWidth="560"

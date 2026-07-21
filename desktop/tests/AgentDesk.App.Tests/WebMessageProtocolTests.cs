@@ -278,6 +278,17 @@ public sealed class WebMessageProtocolTests
         Assert.Equal("C:\\repo", open.WorkspacePath);
         Assert.Equal(ExecutionProfile.WslStrict, open.ExecutionProfile);
 
+        var create = Assert.IsType<SessionNewWebCommand>(
+            WebMessageProtocol.ParseCommand(
+                """
+                {
+                  "schemaVersion": 1,
+                  "type": "session/new",
+                  "executionProfile": "NativeProtected"
+                }
+                """));
+        Assert.Equal(ExecutionProfile.NativeProtected, create.ExecutionProfile);
+
         var rename = Assert.IsType<SessionRenameWebCommand>(
             WebMessageProtocol.ParseCommand(
                 """

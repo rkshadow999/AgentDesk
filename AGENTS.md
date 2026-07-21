@@ -1,67 +1,189 @@
-# AgentDesk 开发交接记录
+# AgentDesk — 给开源用户与贡献者的说明
 
-更新时间：2026-07-20
+> 仓库：[github.com/rkshadow999/AgentDesk](https://github.com/rkshadow999/AgentDesk)  
+> 当前公开预览版本：**0.1.0-alpha.8**（Windows 11 x64）  
+> 更新时间：2026-07-21
 
-## 当前已完成
+本文面向两类读者：
 
-- 修复 WinUI Portable 客户端启动崩溃：`NativeStringResources` 现在把 `.resw` 资源键中的点号转换为 WinAppSDK `ResourceMap` 使用的 `/` 层级路径。
-- 新增 `NativeStringResourcesTests`，覆盖带层级资源键和普通资源键。
-- 已用真实 Windows x64 环境复现并定位原始异常：`0x80073B17 NamedResource`，堆栈位于 `ConfigureLocalizedShell`；修复后的临时发布包可保持进程运行并创建窗口句柄。
-- alpha.6 之前的完整功能变更、中文界面、完全访问确认、字体缩放、检查器宽度持久化、Git/worktree 和 Enter 发送修复均保留。
+1. **想直接使用 AgentDesk 的用户**（下载、安装、自动更新）
+2. **想从源码构建 / 贡献 / 二次分发的开发者**
 
-## 尚未完成 / 交接事项
+更完整的产品说明见根目录 [README.md](README.md) / [README.zh-CN.md](README.zh-CN.md)。  
+安全与执行模式细节见 [desktop/README.md](desktop/README.md)。
 
-1. **必须重新生成正式 alpha.6 包**
+---
 
-   `artifacts/agentdesk-alpha.6-fa0e8b0/package-input-x64` 是修复前生成的包，不能直接交付。提交本修复后重新运行：
+## 1. 终端用户：如何安装（推荐）
 
-   ```powershell
-   $params = @{
-     Architecture     = "x64"
-     Mode             = "All"
-     Version          = "0.1.0-alpha.6"
-     NativeEnginePath = ".\target\release-dist\xai-grok-pager.exe"
-     OutputRoot       = ".\artifacts\agentdesk-alpha.6-fixed"
-     SourceRepository = "https://github.com/rkshadow999/AgentDesk"
-     SourceRevision   = (git rev-parse HEAD)
-   }
-   .\scripts\agentdesk\Build-AgentDeskPackage.ps1 @params
-   .\scripts\agentdesk\Finalize-AgentDeskPackage.ps1 `
-     -Architecture x64 `
-     -Version 0.1.0-alpha.6 `
-     -PackageInputRoot .\artifacts\agentdesk-alpha.6-fixed\package-input-x64 `
-     -OutputRoot .\artifacts\release-alpha.6-fixed
-   ```
+AgentDesk 目前提供 **社区自托管的 Windows 预览包**（Inno Setup 安装程序 + Portable 压缩包），**不是** Microsoft Store 应用，也**尚未**提供受信任的代码签名 MSIX。
 
-   重新打包后必须启动新的 `portable\AgentDesk.App.exe`，确认不再出现 `NamedResource`，并核对 `SOURCE-REVISION.txt`、SHA256、SBOM 和 unsigned MSIX 状态。
+| 方式 | 链接 |
+| --- | --- |
+| **下载页（推荐先打开这里）** | https://update.rkshadow.com/install/ |
+| **Windows Setup.exe**（无需管理员，默认装到 `%LOCALAPPDATA%\AgentDesk`） | https://update.rkshadow.com/install/AgentDesk-0.1.0-alpha.8-win-x64-Setup.exe |
+| **Portable zip**（解压即用） | https://update.rkshadow.com/install/AgentDesk-latest-win-x64-portable.zip |
+| **自动更新 Feed**（客户端内置） | https://update.rkshadow.com/feed/ |
 
-2. **桌面自动化验收未完成**
+### 安装时你会看到什么
 
-   已完成启动烟雾测试，但以下真实 UI 流程尚未逐项记录：
+- 安装包为 **development / 社区构建**，没有微软或企业 Authenticode 签名。
+- Windows **SmartScreen** 可能提示「未知发布者」——这是未签名预览包的正常现象。请在确认下载来源为上述域名后，选择「仍要运行 / 更多信息 → 仍要运行」。
+- Setup 使用 `PrivilegesRequired=lowest`，**不需要管理员权限**。
+- 当前公开通道以 **x64** 为主；ARM64 依赖 CI / 真机，本仓库不声称本机已验证 ARM64 包。
 
-   - `C:\Users\rksha\Documents\sub2` 的 Git/worktree 识别；
-   - Enter 发送、Shift+Enter 换行及中文 IME；
-   - 完全访问开关的原生确认、拒绝和自动 `AllowOnce`；
-   - 检查器侧栏拖拽、键盘调整、复位和重启持久化；
-   - 90/100/110/125/140% 字体缩放；
-   - 真实 Provider 流式提示和取消在新包中的端到端显示。
+### 自动更新如何工作
 
-   上一轮 Computer Use 被物理 Escape 中断，因此不要把这些项目标记为已验收。
+1. 客户端内置 **ECDSA P-256 公钥 pin**，只信任清单上的分离签名（`.sig`）。
+2. 默认检查：
+   - `https://update.rkshadow.com/feed/AgentDesk-update-manifest.json`
+   - `https://update.rkshadow.com/feed/AgentDesk-updater-manifest.json`
+   - 及对应 `.sig`
+3. 资源下载自 `https://update.rkshadow.com/releases/v<version>/…`
+4. **不会静默覆盖你的安装**。设置中开启「检查更新」后，发现新版本会提示你确认再应用。
+5. 信任主机策略见 `UpdateOriginPolicy`（含 `update.rkshadow.com`，并仍兼容 GitHub Release 主机名，便于以后切通道）。
 
-3. **CI / 架构边界**
+**公钥指纹（可核对）：**
 
-   - GitHub Actions run `29736714751` 对提交 `fa0e8b0` 的最终结论需要继续查询。
-   - 本机为 AMD64，ARM64 sidecar 和 ARM64 原生客户端不能在本机声称已验证；依赖 `windows-11-arm` runner。
-   - 当前没有受信任的 PFX 或更新私钥；MSIX/Updater 只能作为 unsigned/development 产物。
+```text
+SHA-256(c9b3ccf2dd92519a17720056dc43c1f3bb55f4652a1d99e68f99160657611e37)
+```
 
-4. **发布前检查**
+仓库内对应文件：
 
-   - 运行完整 `.NET`、Web、Rust、脚本测试和 `dotnet format --verify-no-changes`。
-   - 确认诊断日志不包含 API key、提示词或文件正文。
-   - 推送后再检查 GitHub Actions 是否针对包含本修复的新提交重新运行。
+- `desktop/update/AgentDesk-update-public-key.spki.base64`
+- `desktop/update/AgentDesk-update-public-key.sha256`
 
-## 安全边界
+> **重要：** 更新 **私钥绝不进 Git**。维护者本地路径仅为示例：`%USERPROFILE%\.agentdesk\AgentDesk-update-private.pkcs8.der`。任何人都不该把私钥、API Key、用户对话正文提交到本仓库。
 
-- 不要在仓库、文档、日志或提交信息中写入 API key、Credential Manager 内容或用户文件正文。
-- 不要启动 Docker，也不要删除不属于 AgentDesk 的 Docker 数据。
-- `NativeProtected` 仍是兼容模式，不等同于沙箱；`WslStrict` 继续 fail-closed，直到子进程网络限制可证明。
+### 从更旧预览包升级
+
+| 你手里的包 | 建议 |
+| --- | --- |
+| 含自托管公钥的 alpha.6 selfhost / alpha.7 | 设置中检查更新 → 升到 **alpha.8** |
+| 更早的 `alpha.6-fixed` 等**不含新公钥**的包 | **无法校验** `update.rkshadow.com` 清单 → 请重新下载上面的 Setup / Portable |
+
+---
+
+## 2. 当前 alpha.8 已交付的能力（用户可感知）
+
+| 能力 | 说明 |
+| --- | --- |
+| 中文优先桌面 UI + 英文切换 | Web 文案即时切换；部分原生字符串可能需重启 |
+| 工作区选择 / 最近工作区 | 本地持久化最近路径，侧栏可切换、添加、移除 |
+| 会话中心 | 新建会话、打开会话、重命名、归档等（以 UI 实际暴露为准） |
+| **多会话切换 UX** | 运行中切换会弹出确认（中断当前 turn 后切换）；侧栏有明确「打开」操作 |
+| **会话线程本地缓存** | 切换会话时尽量保留本机投影的对话气泡（不是云端完整历史） |
+| 检查器（变更 / 终端 / 计划） | 按会话绑定；标签页显示修复（CSS `[hidden]` vs `display`） |
+| 原生执行风险确认 | 首次本机执行需确认；**同一工作区**内可复用确认 |
+| 完全访问 / 字体缩放 / 检查器宽度 | 见设置与桌面控件；完全访问有独立原生确认 |
+| Portable 签名校验更新 | 见上一节 |
+
+### 请诚实理解的边界（开源预览）
+
+1. **不是 Codex 级「多 worker 真并行」**  
+   仍是 **单引擎 sidecar**。运行中切换会话 = **中断 / supersede 当前 turn**，不是多条任务在后台同时跑满。
+
+2. **冷启动「完整历史回放」仍有限**  
+   侧栏缓存 + 当次会话投影是主要路径；不要默认「关掉软件再开，一定能 100% 还原所有云端/引擎历史」。
+
+3. **`NativeProtected` ≠ 沙箱**  
+   UI 写明「本机兼容（非沙箱）」。命令以当前 Windows 用户权限运行。  
+   **`WslStrict` 继续 fail-closed**，直到子进程网络限制可被证明。
+
+4. **无受信任 MSIX / 无正式 Authenticode**  
+   正式商店或企业分发需要你自己的证书与 CI 签名流水线。
+
+5. **Alpha 软件有风险**  
+   可能读文件、改文件、跑命令。只在你信任的工作区使用，并自行保管 API Key。
+
+---
+
+## 3. 从源码构建（开发者）
+
+没有「官方一键安装命令」。在发布受信任签名包之前，推荐：
+
+```powershell
+# 工具链要求见 README / docs/BUILD-AND-TEST.md
+$env:PROTOC = ./scripts/agentdesk/Install-Protoc.ps1 `
+  -Version 29.3 `
+  -Destination "$env:TEMP/agentdesk-protoc"
+
+Set-Location desktop/web
+npm ci
+npm test
+npm run build
+Set-Location ../..
+
+cargo build --locked -p xai-grok-pager-bin --profile release-dist --features release-dist
+
+./scripts/agentdesk/Build-AgentDeskPackage.ps1 `
+  -Architecture x64 `
+  -Mode Portable `
+  -NativeEnginePath ./target/release-dist/xai-grok-pager.exe `
+  -OutputRoot ./artifacts/agentdesk
+```
+
+文档：
+
+- [docs/INSTALLATION.md](docs/INSTALLATION.md)
+- [docs/BUILD-AND-TEST.md](docs/BUILD-AND-TEST.md) / [docs/BUILD-AND-TEST.zh-CN.md](docs/BUILD-AND-TEST.zh-CN.md)
+
+Web 工作台单测（本轮验证）：**270 passed**。
+
+---
+
+## 4. 维护者：发布社区更新包（可选自托管）
+
+社区默认更新源为 **update.rkshadow.com**（Cloudflare 代理到维护者服务器）。  
+若你 fork 并自建更新站，请：
+
+1. 生成自己的 ECDSA P-256 密钥对，**只把公钥**放进你分发的客户端；
+2. 修改 `AgentDeskUpdateDefaults` / `UpdateOriginPolicy` 中的 feed 与信任主机；
+3. 使用下列脚本签名并上传（**不要把私钥写进仓库或 Issues**）。
+
+| 脚本 | 作用 |
+| --- | --- |
+| `scripts/agentdesk/Build-AgentDeskWindowsInstaller.ps1` | 生成 Inno Setup `Setup.exe` |
+| `scripts/agentdesk/Publish-AgentDeskSelfHostedUpdate.ps1` | 签名清单 + 上传 feed/releases/install |
+| `scripts/agentdesk/New-AgentDeskUpdateManifest.ps1` | 生成更新清单（支持自定义 Asset Base URL） |
+| `scripts/agentdesk/update.rkshadow.com.nginx.conf` | nginx 站点参考配置 |
+
+示例：
+
+```powershell
+$env:DOTNET_ROOT = "$env:USERPROFILE\.dotnet"
+$env:PATH = "$env:USERPROFILE\.dotnet;C:\Program Files\PowerShell\7;" + $env:PATH
+
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\agentdesk\Publish-AgentDeskSelfHostedUpdate.ps1 `
+  -Version "0.1.0-alpha.8" `
+  -ReleaseDirectory ".\artifacts\release-alpha.8-selfhost\AgentDesk-0.1.0-alpha.8-win-x64"
+```
+
+发布产物目录（本机，已 gitignore）：`artifacts/release-alpha.*`、`artifacts/selfhosted-feed/`。
+
+---
+
+## 5. 本仓库近期功能变更摘要（便于 Code Review）
+
+- **桌面宿主**：最近工作区持久化、会话 open/new 与 supersede 协作、自托管更新默认 feed 与公钥 pin。
+- **Workbench（React）**：会话线程缓存、运行中切换确认、侧栏拖拽宽度、首轮发送/流式在 session 绑定前可绘制、`prompt/completed` 正确解锁输入。
+- **Inspector**：会话绑定与活动标签显示修复。
+- **打包**：Inno Setup 安装包 + 签名 Portable 更新通道。
+
+---
+
+## 6. 安全与贡献约定
+
+- **禁止**在仓库、文档、日志、Issue、PR 中写入：API Key、Credential Manager 内容、更新私钥、用户文件正文或对话原文。
+- 不要在本机构建说明里附带他人机器上的私有路径作为「唯一安装方式」；对外链接以 **https://update.rkshadow.com/** 与 GitHub 仓库为准。
+- `NativeProtected` / Full Access / Windows UI Automation 都是高权限能力，贡献相关代码时请保持确认门与 fail-closed 行为。
+- 本项目基于开源 `xai-org/grok-build` 运行时构建社区 Windows 客户端，**与 xAI / OpenAI 等无官方隶属关系**。
+
+---
+
+## 7. 问题反馈
+
+- Issues：https://github.com/rkshadow999/AgentDesk/issues  
+- 请注明：Windows 版本、x64/ARM64、安装方式（Setup / Portable / 源码）、版本号（设置或 `SOURCE-REVISION`）、复现步骤。  
+- **不要**在 Issue 中粘贴 API Key 或私有代码内容。

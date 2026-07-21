@@ -7,12 +7,10 @@ namespace AgentDesk.App.Maintenance;
 public static class AgentDeskUpdateDefaults
 {
     private const string PublicKeyResourceName = "AgentDesk.UpdatePublicKey.SpkiBase64";
+    // Community self-hosted feed key (update.rkshadow.com). Generated 2026-07-21.
     private const string PublicKeySha256 =
-        "a7350091fed6493ac0aa0d6222b4f2e0b80eb365c70fcf89d9040276e47b6e15";
-    private const string StableFeedTag = "update-stable";
-    private const string PrereleaseFeedTag = "update-prerelease";
-    private const string ReleaseDownloadBase =
-        "https://github.com/rkshadow999/AgentDesk/releases/download";
+        "c9b3ccf2dd92519a17720056dc43c1f3bb55f4652a1d99e68f99160657611e37";
+    private const string SelfHostedFeedBase = "https://update.rkshadow.com/feed";
 
     public static AgentDeskUpdateOptions Create(
         SemanticVersion installedVersion,
@@ -22,16 +20,16 @@ public static class AgentDeskUpdateDefaults
         IReadOnlyList<string> restartArguments,
         bool? allowPrerelease = null)
     {
-        var resolvedAllowPrerelease = allowPrerelease ?? installedVersion.IsPrerelease;
-        var feedTag = resolvedAllowPrerelease ? PrereleaseFeedTag : StableFeedTag;
+        // Self-hosted feed serves one channel; pre-release packages still receive feed updates.
+        var resolvedAllowPrerelease = allowPrerelease ?? true;
         var publicKey = LoadPinnedPublicKey();
         try
         {
             return new AgentDeskUpdateOptions(
-                FeedUri(feedTag, "AgentDesk-updater-manifest.json"),
-                FeedUri(feedTag, "AgentDesk-updater-manifest.json.sig"),
-                FeedUri(feedTag, "AgentDesk-update-manifest.json"),
-                FeedUri(feedTag, "AgentDesk-update-manifest.json.sig"),
+                FeedUri("AgentDesk-updater-manifest.json"),
+                FeedUri("AgentDesk-updater-manifest.json.sig"),
+                FeedUri("AgentDesk-update-manifest.json"),
+                FeedUri("AgentDesk-update-manifest.json.sig"),
                 publicKey,
                 installedVersion,
                 architecture,
@@ -46,8 +44,8 @@ public static class AgentDeskUpdateDefaults
         }
     }
 
-    private static Uri FeedUri(string feedTag, string fileName) =>
-        new($"{ReleaseDownloadBase}/{feedTag}/{fileName}");
+    private static Uri FeedUri(string fileName) =>
+        new($"{SelfHostedFeedBase}/{fileName}");
 
     public static byte[] LoadPinnedPublicKey()
     {

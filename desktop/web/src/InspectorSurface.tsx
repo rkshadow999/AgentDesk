@@ -63,6 +63,11 @@ export function InspectorSurface({
     terminal: null,
     plan: null
   });
+  // When the user picks a tab, stop auto-following until the session resets.
+  const userPinnedTabRef = useRef(false);
+  const previousDiffCountRef = useRef(0);
+  const previousPlanCountRef = useRef(0);
+  const previousTerminalRevisionRef = useRef(0);
   const hasDiffs = state.diffs.length > 0;
   const effectiveSelectedPath = selectedPath && state.diffs.some((diff) => diff.path === selectedPath)
     ? selectedPath
@@ -76,6 +81,13 @@ export function InspectorSurface({
   selectedDiffRef.current = selectedDiff;
   terminalTranscriptRef.current = state.terminalTranscript;
   terminalRevisionRef.current = state.terminalRevision;
+
+  function selectTab(tab: InspectorTab, options?: { pinned?: boolean }) {
+    if (options?.pinned !== false) {
+      userPinnedTabRef.current = true;
+    }
+    setActiveTab(tab);
+  }
 
   useEffect(() => {
     bridge.send({ type: "ui/ready" });
@@ -158,20 +170,62 @@ export function InspectorSurface({
 
   useEffect(() => {
     if (activeTab === "changes") {
-      diffViewerRef.current?.layout();
+      // Monaco needs a layout pass after the panel becomes visible again.
+      requestAnimationFrame(() => diffViewerRef.current?.layout());
     } else if (activeTab === "terminal") {
-      terminalViewerRef.current?.fit();
+      requestAnimationFrame(() => terminalViewerRef.current?.fit());
     }
   }, [activeTab]);
 
+  // Helpful auto-focus (like IDE inspectors), but never override a user pin.
+  useEffect(() => {
+    if (userPinnedTabRef.current) {
+      previousDiffCountRef.current = state.diffs.length;
+      previousPlanCountRef.current = state.plan.length;
+      previousTerminalRevisionRef.current = state.terminalRevision;
+      return;
+    }
+
+    if (state.diffs.length > previousDiffCountRef.current) {
+      setActiveTab("changes");
+    } else if (state.plan.length > previousPlanCountRef.current) {
+      setActiveTab("plan");
+    } else if (state.terminalRevision > previousTerminalRevisionRef.current &&
+        state.terminalTranscript.characterCount > 0) {
+      setActiveTab("terminal");
+    }
+
+    previousDiffCountRef.current = state.diffs.length;
+    previousPlanCountRef.current = state.plan.length;
+    previousTerminalRevisionRef.current = state.terminalRevision;
+  }, [
+    state.diffs.length,
+    state.plan.length,
+    state.terminalRevision,
+    state.terminalTranscript.characterCount
+  ]);
+
+  // New engine session: clear pin so auto-focus can help again.
+  useEffect(() => {
+    userPinnedTabRef.current = false;
+    previousDiffCountRef.current = 0;
+    previousPlanCountRef.current = 0;
+    previousTerminalRevisionRef.current = 0;
+    setActiveTab("changes");
+    setSelectedPath(undefined);
+  }, [state.sessionId]);
+
   useEffect(() => {
     const layout = () => {
-      diffViewerRef.current?.layout();
-      terminalViewerRef.current?.fit();
+      if (activeTab === "changes") {
+        diffViewerRef.current?.layout();
+      } else if (activeTab === "terminal") {
+        terminalViewerRef.current?.fit();
+      }
     };
     window.addEventListener("resize", layout);
     return () => window.removeEventListener("resize", layout);
-  }, []);
+  }, [activeTab]);
 
   function moveTab(currentTab: InspectorTab, event: React.KeyboardEvent<HTMLButtonElement>) {
     const currentIndex = inspectorTabOrder.indexOf(currentTab);
@@ -190,7 +244,7 @@ export function InspectorSurface({
 
     event.preventDefault();
     const nextTab = inspectorTabOrder[nextIndex];
-    setActiveTab(nextTab);
+    selectTab(nextTab);
     tabRefs.current[nextTab]?.focus();
   }
 
@@ -202,14 +256,14 @@ export function InspectorSurface({
           buttonRef={(button) => { tabRefs.current.changes = button; }}
           label={t("changes")}
           count={state.diffs.length || undefined}
-          onClick={() => setActiveTab("changes")}
+          onClick={() => selectTab("changes")}
           onKeyDown={(event) => moveTab("changes", event)}
         ><FileDiff size={15} /></InspectorTabButton>
         <InspectorTabButton
           active={activeTab === "terminal"}
           buttonRef={(button) => { tabRefs.current.terminal = button; }}
           label={t("terminal")}
-          onClick={() => setActiveTab("terminal")}
+          onClick={() => selectTab("terminal")}
           onKeyDown={(event) => moveTab("terminal", event)}
         ><TerminalSquare size={15} /></InspectorTabButton>
         <InspectorTabButton
@@ -217,45 +271,61 @@ export function InspectorSurface({
           buttonRef={(button) => { tabRefs.current.plan = button; }}
           label={t("plan")}
           count={state.plan.length || undefined}
-          onClick={() => setActiveTab("plan")}
+          onClick={() => selectTab("plan")}
           onKeyDown={(event) => moveTab("plan", event)}
         ><ListChecks size={15} /></InspectorTabButton>
       </div>
 
       <section className="inspector-content">
         {state.diffs.length === 0 ? (
-            <div className="inspector-empty" hidden={activeTab !== "changes"}>
-              {t("noChangesToReview")}
+          <div
+            className={`inspector-panel inspector-empty${activeTab === "changes" ? " is-active" : ""}`}
+            role="tabpanel"
+            aria-hidden={activeTab !== "changes"}
+          >
+            {t("noChangesToReview")}
+          </div>
+        ) : (
+          <div
+            className={`inspector-panel changes-layout${activeTab === "changes" ? " is-active" : ""}`}
+            role="tabpanel"
+            aria-hidden={activeTab !== "changes"}
+          >
+            <div className="inspector-file-list" aria-label={t("changedFiles")}>
+              {state.diffs.map((diff) => (
+                <button
+                  key={diff.path}
+                  type="button"
+                  className={`inspector-file${diff.path === effectiveSelectedPath ? " active" : ""}`}
+                  aria-label={diff.path}
+                  onClick={() => setSelectedPath(diff.path)}
+                >
+                  <FileCode2 size={15} />
+                  <span title={diff.path}>{diff.path}</span>
+                </button>
+              ))}
             </div>
-          ) : (
-            <div className="changes-layout" hidden={activeTab !== "changes"}>
-              <div className="inspector-file-list" aria-label={t("changedFiles")}>
-                {state.diffs.map((diff) => (
-                  <button
-                    key={diff.path}
-                    type="button"
-                    className={`inspector-file${diff.path === effectiveSelectedPath ? " active" : ""}`}
-                    aria-label={diff.path}
-                    onClick={() => setSelectedPath(diff.path)}
-                  >
-                    <FileCode2 size={15} />
-                    <span title={diff.path}>{diff.path}</span>
-                  </button>
-                ))}
-              </div>
-              <div className="diff-viewer" ref={diffHostRef} aria-label={t("codeDiff")} />
-            </div>
+            <div className="diff-viewer" ref={diffHostRef} aria-label={t("codeDiff")} />
+          </div>
         )}
 
-        <div className="terminal-pane" hidden={activeTab !== "terminal"}>
-            {state.terminalTranscript.characterCount === 0 && (
-              <div className="inspector-empty overlay">{t("noTerminalOutput")}</div>
-            )}
-            <div className="terminal-viewer" ref={terminalHostRef} aria-label={t("terminalOutput")} />
+        <div
+          className={`inspector-panel terminal-pane${activeTab === "terminal" ? " is-active" : ""}`}
+          role="tabpanel"
+          aria-hidden={activeTab !== "terminal"}
+        >
+          {state.terminalTranscript.characterCount === 0 && (
+            <div className="inspector-empty overlay">{t("noTerminalOutput")}</div>
+          )}
+          <div className="terminal-viewer" ref={terminalHostRef} aria-label={t("terminalOutput")} />
         </div>
 
-        {activeTab === "plan" && (
-          state.plan.length === 0 ? (
+        <div
+          className={`inspector-panel plan-pane${activeTab === "plan" ? " is-active" : ""}`}
+          role="tabpanel"
+          aria-hidden={activeTab !== "plan"}
+        >
+          {state.plan.length === 0 ? (
             <div className="inspector-empty">{t("noPlanGenerated")}</div>
           ) : (
             <ol className="plan-list">
@@ -263,8 +333,8 @@ export function InspectorSurface({
                 <PlanRow key={`${index}-${entry.content}`} entry={entry} t={t} />
               ))}
             </ol>
-          )
-        )}
+          )}
+        </div>
       </section>
     </main>
   );

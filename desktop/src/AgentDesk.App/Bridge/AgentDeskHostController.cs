@@ -52,6 +52,12 @@ public sealed partial class AgentDeskHostController :
     private string WorktreeErrorMessage => Message(
         "\u65e0\u6cd5\u5b8c\u6210\u5de5\u4f5c\u6811\u64cd\u4f5c\u3002",
         "The worktree operation could not be completed.");
+    private string WorktreeNotGitRepositoryMessage => Message(
+        "\u5f53\u524d\u5de5\u4f5c\u533a\u4e0d\u662f Git \u4ed3\u5e93\uff0c\u5de5\u4f5c\u6811\u529f\u80fd\u4e0d\u53ef\u7528\u3002\u8bf7\u9009\u62e9\u5305\u542b .git \u7684\u4ed3\u5e93\u6839\u76ee\u5f55\u3002",
+        "The current workspace is not a Git repository, so worktrees are unavailable. Choose a repository root that contains .git.");
+    private string NewSessionErrorMessage => Message(
+        "\u65e0\u6cd5\u521b\u5efa\u65b0\u4f1a\u8bdd\u3002",
+        "A new session could not be created.");
     private string MemoryFlushErrorMessage => Message(
         "\u65e0\u6cd5\u7acb\u5373\u5237\u65b0\u4f1a\u8bdd\u8bb0\u5fc6\u3002",
         "Session memory could not be refreshed now.");
@@ -80,6 +86,7 @@ public sealed partial class AgentDeskHostController :
     private readonly IProviderSettingsStore _providerSettingsStore;
     private readonly ISessionIndexStore _sessionIndexStore;
     private readonly IUiPreferencesStore _uiPreferencesStore;
+    private readonly IRecentWorkspaceStore _recentWorkspaceStore;
     private readonly ICrashRecoveryStore _crashRecoveryStore;
     private readonly IUserNotificationService _notificationService;
     private readonly ExtensionApprovalHandler? _extensionApprovalHandler;
@@ -125,6 +132,8 @@ public sealed partial class AgentDeskHostController :
     private bool _providerSettingsLoaded;
     private UiPreferences _uiPreferences = UiPreferences.Default;
     private bool _uiPreferencesLoaded;
+    private IReadOnlyList<string> _recentWorkspaces = [];
+    private bool _recentWorkspacesLoaded;
     private bool _crashRecoveryLoaded;
     private TaskCompletionSource? _disposeCompletion;
     private volatile bool _disposing;
@@ -142,6 +151,7 @@ public sealed partial class AgentDeskHostController :
             new JsonProviderSettingsStore(),
             new SqliteSessionIndexStore(),
             new JsonUiPreferencesStore(),
+            new JsonRecentWorkspaceStore(),
             notificationService,
             extensionApprovalHandler,
             new JsonCrashRecoveryStore(),
@@ -159,7 +169,8 @@ public sealed partial class AgentDeskHostController :
             sidecarHostFactory,
             new EmptyProviderSettingsStore(),
             new EmptySessionIndexStore(),
-            new InMemoryUiPreferencesStore())
+            new InMemoryUiPreferencesStore(),
+            new InMemoryRecentWorkspaceStore())
     {
     }
 
@@ -174,7 +185,8 @@ public sealed partial class AgentDeskHostController :
             sidecarHostFactory,
             providerSettingsStore,
             new SqliteSessionIndexStore(),
-            new InMemoryUiPreferencesStore())
+            new InMemoryUiPreferencesStore(),
+            new InMemoryRecentWorkspaceStore())
     {
     }
 
@@ -190,7 +202,8 @@ public sealed partial class AgentDeskHostController :
             sidecarHostFactory,
             providerSettingsStore,
             sessionIndexStore,
-            new InMemoryUiPreferencesStore())
+            new InMemoryUiPreferencesStore(),
+            new InMemoryRecentWorkspaceStore())
     {
     }
 
@@ -205,6 +218,33 @@ public sealed partial class AgentDeskHostController :
         ExtensionApprovalHandler? extensionApprovalHandler = null,
         ICrashRecoveryStore? crashRecoveryStore = null,
         Func<CancellationToken, Task<bool>>? fullAccessApprovalHandler = null)
+        : this(
+            options,
+            credentialStore,
+            sidecarHostFactory,
+            providerSettingsStore,
+            sessionIndexStore,
+            uiPreferencesStore,
+            new InMemoryRecentWorkspaceStore(),
+            notificationService,
+            extensionApprovalHandler,
+            crashRecoveryStore,
+            fullAccessApprovalHandler)
+    {
+    }
+
+    public AgentDeskHostController(
+        AgentDeskHostOptions options,
+        ICredentialStore credentialStore,
+        IAgentDeskSidecarHostFactory sidecarHostFactory,
+        IProviderSettingsStore providerSettingsStore,
+        ISessionIndexStore sessionIndexStore,
+        IUiPreferencesStore uiPreferencesStore,
+        IRecentWorkspaceStore recentWorkspaceStore,
+        IUserNotificationService? notificationService = null,
+        ExtensionApprovalHandler? extensionApprovalHandler = null,
+        ICrashRecoveryStore? crashRecoveryStore = null,
+        Func<CancellationToken, Task<bool>>? fullAccessApprovalHandler = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(credentialStore);
@@ -212,6 +252,7 @@ public sealed partial class AgentDeskHostController :
         ArgumentNullException.ThrowIfNull(providerSettingsStore);
         ArgumentNullException.ThrowIfNull(sessionIndexStore);
         ArgumentNullException.ThrowIfNull(uiPreferencesStore);
+        ArgumentNullException.ThrowIfNull(recentWorkspaceStore);
         ArgumentNullException.ThrowIfNull(options.TimeProvider);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.CredentialName);
         if (options.AcpHandshakeTimeout <= TimeSpan.Zero)
@@ -236,6 +277,7 @@ public sealed partial class AgentDeskHostController :
         _providerSettingsStore = providerSettingsStore;
         _sessionIndexStore = sessionIndexStore;
         _uiPreferencesStore = uiPreferencesStore;
+        _recentWorkspaceStore = recentWorkspaceStore;
         _crashRecoveryStore = crashRecoveryStore ?? new EmptyCrashRecoveryStore();
         _notificationService = notificationService ?? new NullUserNotificationService();
         _extensionApprovalHandler = extensionApprovalHandler;
@@ -325,6 +367,7 @@ public sealed partial class AgentDeskHostController :
 
         WorkspaceSelectedWebEvent? workspaceEvent = null;
         EngineStatusWebEvent? statusEvent = null;
+        RecentWorkspacesChangedWebEvent? recentWorkspacesEvent = null;
         CancellationTokenSource? workspaceFileSearchCancellation = null;
         HashSet<CancellationTokenSource> runtimeOperationCancellations = [];
         var updated = false;
@@ -354,6 +397,10 @@ public sealed partial class AgentDeskHostController :
                     _workspaceGeneration);
                 workspaceFileSearchCancellation = DetachWorkspaceFileSearchUnsafe();
                 updated = true;
+                recentWorkspacesEvent = await RememberWorkspaceUnsafeAsync(
+                        workspacePath,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             }
             else
             {
@@ -405,6 +452,10 @@ public sealed partial class AgentDeskHostController :
                     workspaceFileSearchCancellation = DetachWorkspaceFileSearchUnsafe();
                     statusEvent = SetStatusUnsafe("idle", null, null);
                     updated = true;
+                    recentWorkspacesEvent = await RememberWorkspaceUnsafeAsync(
+                            workspacePath,
+                            cancellationToken)
+                        .ConfigureAwait(false);
                 }
             }
         }
@@ -419,6 +470,11 @@ public sealed partial class AgentDeskHostController :
         if (workspaceEvent is not null)
         {
             Publish(workspaceEvent);
+        }
+
+        if (recentWorkspacesEvent is not null)
+        {
+            Publish(recentWorkspacesEvent);
         }
 
         if (statusEvent is not null)
@@ -758,9 +814,16 @@ public sealed partial class AgentDeskHostController :
             SaveUiPreferencesWebCommand value => HandleSaveUiPreferencesAsync(
                 value,
                 cancellationToken),
+            OpenRecentWorkspaceWebCommand value => HandleOpenRecentWorkspaceAsync(
+                value,
+                cancellationToken),
+            RemoveRecentWorkspaceWebCommand value => HandleRemoveRecentWorkspaceAsync(
+                value,
+                cancellationToken),
             SaveProviderWebCommand value => SaveProviderAsync(value, null, cancellationToken),
             SessionListWebCommand value => HandleSessionListAsync(value, cancellationToken),
             SessionOpenWebCommand value => HandleSessionOpenAsync(value, cancellationToken),
+            SessionNewWebCommand value => HandleSessionNewAsync(value, cancellationToken),
             SessionRenameWebCommand value => HandleSessionRenameAsync(value, cancellationToken),
             SessionArchiveWebCommand value => HandleSessionArchiveAsync(value, cancellationToken),
             SessionForkWebCommand value => HandleSessionForkAsync(value, cancellationToken),
@@ -937,6 +1000,8 @@ public sealed partial class AgentDeskHostController :
         EngineStatusWebEvent statusEvent;
         ProviderStatusWebEvent? providerEvent = null;
         UiPreferencesChangedWebEvent preferencesEvent;
+        RecentWorkspacesChangedWebEvent? recentWorkspacesEvent = null;
+        string? restoreWorkspacePath = null;
 
         await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -952,9 +1017,36 @@ public sealed partial class AgentDeskHostController :
                 _uiPreferences = UiPreferences.Default;
                 _uiPreferencesLoaded = true;
             }
+            try
+            {
+                await EnsureRecentWorkspacesLoadedUnsafeAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                _recentWorkspaces = [];
+                _recentWorkspacesLoaded = true;
+            }
+
+            // Restore the most recent workspace when the host was launched without one.
+            if (_workspacePath is null &&
+                _recentWorkspaces.Count > 0 &&
+                Directory.Exists(_recentWorkspaces[0]))
+            {
+                restoreWorkspacePath = _recentWorkspaces[0];
+            }
+            else if (_workspacePath is not null)
+            {
+                recentWorkspacesEvent = await RememberWorkspaceUnsafeAsync(
+                        _workspacePath,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
             _uiPreferences = ApplyPolicyToPreferences(
                 _uiPreferences.ApplyHostCapabilities(_options.IsWslStrictAvailable));
             preferencesEvent = new UiPreferencesChangedWebEvent(_uiPreferences);
+            recentWorkspacesEvent ??= new RecentWorkspacesChangedWebEvent(_recentWorkspaces);
             try
             {
                 await EnsureProviderSettingsLoadedUnsafeAsync(cancellationToken)
@@ -999,6 +1091,10 @@ public sealed partial class AgentDeskHostController :
         }
 
         Publish(preferencesEvent);
+        if (recentWorkspacesEvent is not null)
+        {
+            Publish(recentWorkspacesEvent);
+        }
         if (workspaceEvent is not null)
         {
             Publish(workspaceEvent);
@@ -1009,6 +1105,129 @@ public sealed partial class AgentDeskHostController :
         {
             Publish(providerEvent);
         }
+
+        if (restoreWorkspacePath is not null)
+        {
+            _ = await UpdateWorkspaceAsync(restoreWorkspacePath, cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleOpenRecentWorkspaceAsync(
+        OpenRecentWorkspaceWebCommand command,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        if (string.IsNullOrWhiteSpace(command.Path) || !Directory.Exists(command.Path))
+        {
+            RecentWorkspacesChangedWebEvent? snapshot = null;
+            await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                ThrowIfDisposed();
+                await EnsureRecentWorkspacesLoadedUnsafeAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                // Drop the missing entry so the UI cannot keep offering it.
+                var remaining = _recentWorkspaces
+                    .Where(path => !string.Equals(path, command.Path, StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+                if (remaining.Length != _recentWorkspaces.Count)
+                {
+                    _recentWorkspaces = remaining;
+                    await _recentWorkspaceStore
+                        .SaveAsync(_recentWorkspaces, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                snapshot = new RecentWorkspacesChangedWebEvent(_recentWorkspaces);
+            }
+            finally
+            {
+                _stateGate.Release();
+            }
+
+            if (snapshot is not null)
+            {
+                Publish(snapshot);
+            }
+            return;
+        }
+
+        _ = await UpdateWorkspaceAsync(command.Path, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleRemoveRecentWorkspaceAsync(
+        RemoveRecentWorkspaceWebCommand command,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        RecentWorkspacesChangedWebEvent? snapshot = null;
+        await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            await EnsureRecentWorkspacesLoadedUnsafeAsync(cancellationToken).ConfigureAwait(false);
+            var remaining = _recentWorkspaces
+                .Where(path => !string.Equals(path, command.Path, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (remaining.Length == _recentWorkspaces.Count)
+            {
+                return;
+            }
+
+            _recentWorkspaces = remaining;
+            await _recentWorkspaceStore
+                .SaveAsync(_recentWorkspaces, cancellationToken)
+                .ConfigureAwait(false);
+            snapshot = new RecentWorkspacesChangedWebEvent(_recentWorkspaces);
+        }
+        finally
+        {
+            _stateGate.Release();
+        }
+
+        if (snapshot is not null)
+        {
+            Publish(snapshot);
+        }
+    }
+
+    private async Task EnsureRecentWorkspacesLoadedUnsafeAsync(CancellationToken cancellationToken)
+    {
+        if (_recentWorkspacesLoaded)
+        {
+            return;
+        }
+
+        _recentWorkspaces = await _recentWorkspaceStore
+            .LoadAsync(cancellationToken)
+            .ConfigureAwait(false);
+        _recentWorkspacesLoaded = true;
+    }
+
+    private async Task<RecentWorkspacesChangedWebEvent> RememberWorkspaceUnsafeAsync(
+        string workspacePath,
+        CancellationToken cancellationToken)
+    {
+        await EnsureRecentWorkspacesLoadedUnsafeAsync(cancellationToken).ConfigureAwait(false);
+        var next = new List<string> { Path.GetFullPath(workspacePath) };
+        foreach (var path in _recentWorkspaces)
+        {
+            if (next.Count >= JsonRecentWorkspaceStore.MaximumEntries)
+            {
+                break;
+            }
+
+            if (!string.Equals(path, workspacePath, StringComparison.OrdinalIgnoreCase))
+            {
+                next.Add(path);
+            }
+        }
+
+        _recentWorkspaces = next;
+        await _recentWorkspaceStore
+            .SaveAsync(_recentWorkspaces, cancellationToken)
+            .ConfigureAwait(false);
+        return new RecentWorkspacesChangedWebEvent(_recentWorkspaces);
     }
 
     private async Task HandleSaveUiPreferencesAsync(
@@ -1797,6 +2016,7 @@ public sealed partial class AgentDeskHostController :
         TResult result = default!;
         var failed = false;
         var callerCancelled = false;
+        string? failureDetail = null;
         try
         {
             context = await BeginWorkspaceOperationAsync(
@@ -1811,9 +2031,20 @@ public sealed partial class AgentDeskHostController :
         {
             callerCancelled = true;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            failed = true;
+            // Non-git workspaces should list as empty, not as a hard failure.
+            if (operation is WorktreeOperation.List &&
+                IsNonGitWorktreeException(exception))
+            {
+                failed = false;
+                result = (TResult)(object)Array.Empty<WorktreeRecord>();
+            }
+            else
+            {
+                failed = true;
+                failureDetail = DescribeWorktreeFailure(exception);
+            }
         }
 
         var isCurrent = context is not null
@@ -1830,10 +2061,51 @@ public sealed partial class AgentDeskHostController :
         Publish(failed
             ? new WorktreeErrorWebEvent(
                 workspaceGeneration,
-                WorktreeErrorMessage,
+                failureDetail ?? WorktreeErrorMessage,
                 operation,
                 itemId)
             : successEvent(result));
+    }
+
+    private string DescribeWorktreeFailure(Exception exception)
+    {
+        if (IsNonGitWorktreeException(exception))
+        {
+            return WorktreeNotGitRepositoryMessage;
+        }
+
+        var detail = exception.Message?.Trim();
+        if (string.IsNullOrWhiteSpace(detail) ||
+            detail.Length > 512 ||
+            detail.Contains('\r', StringComparison.Ordinal) ||
+            detail.Contains('\n', StringComparison.Ordinal))
+        {
+            return WorktreeErrorMessage;
+        }
+
+        // Keep the generic prefix so UI copy stays localized and bounded.
+        return $"{WorktreeErrorMessage} {detail}";
+    }
+
+    private static bool IsNonGitWorktreeException(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            var message = current.Message;
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                continue;
+            }
+
+            if (message.Contains("not a git repository", StringComparison.OrdinalIgnoreCase) ||
+                message.Contains("Not a git repository", StringComparison.Ordinal) ||
+                message.Contains("is not a git repository", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static TimeSpan? WorktreeMaximumAge(long? maximumAgeSeconds)
@@ -2423,6 +2695,103 @@ public sealed partial class AgentDeskHostController :
         return (_client, _sessionId);
     }
 
+    private async Task HandleSessionNewAsync(
+        SessionNewWebCommand command,
+        CancellationToken cancellationToken)
+    {
+        EngineStatusWebEvent? errorEvent = null;
+        SessionActiveChangedWebEvent? activeEvent = null;
+        EngineStatusWebEvent? readyEvent = null;
+        HashSet<CancellationTokenSource> runtimeOperationCancellations = [];
+        SupersededPrompt? superseded = null;
+
+        await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            if (_workspacePath is null)
+            {
+                errorEvent = SetStatusUnsafe("error", WorkspaceRequiredMessage, null);
+            }
+            else if (_activeMutationOperationId is not null ||
+                     _activeMaintenanceLeaseId is not null ||
+                     _activeCloudLeaseId is not null)
+            {
+                errorEvent = new EngineStatusWebEvent(
+                    "running",
+                    BusyMessage,
+                    _sessionId?.Value,
+                    EngineEpoch: Volatile.Read(ref _engineEventEpoch));
+            }
+            else
+            {
+                try
+                {
+                    // Codex-style: allow starting a new thread while another turn is active.
+                    // Single sidecar: fully supersede the in-flight turn before restarting.
+                    superseded = SupersedeInFlightPromptUnsafe();
+
+                    await EnsureUiPreferencesLoadedUnsafeAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    await EnsureProviderSettingsLoadedUnsafeAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    if (_providerProfile is { CanSendCredentials: false })
+                    {
+                        throw new InvalidOperationException(InsecureProviderMessage);
+                    }
+
+                    var profile = command.ExecutionProfile;
+                    if (profile is ExecutionProfile.WslStrict && !_options.IsWslStrictAvailable)
+                    {
+                        throw new NotSupportedException(WslStrictUnavailableMessage);
+                    }
+
+                    // Force a fresh session/new even if an engine session is already open.
+                    _restartEngineBeforeNextPrompt = true;
+                    var context = await EnsureEngineAsync(
+                            profile,
+                            runtimeOperationCancellations,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    CollectRuntimeOperationCancellationsUnsafe(runtimeOperationCancellations);
+                    activeEvent = new SessionActiveChangedWebEvent(
+                        context.SessionId.Value,
+                        _workspacePath,
+                        context.Generation);
+                    readyEvent = SetStatusUnsafe("ready", null, context.SessionId.Value);
+                }
+                catch (Exception)
+                {
+                    errorEvent = SetStatusUnsafe("error", NewSessionErrorMessage, _sessionId?.Value);
+                }
+            }
+        }
+        finally
+        {
+            _stateGate.Release();
+            TryCancel(runtimeOperationCancellations);
+            DisposeSupersededPrompt(superseded);
+        }
+
+        await BestEffortCancelSupersededAsync(superseded, cancellationToken).ConfigureAwait(false);
+
+        if (errorEvent is not null)
+        {
+            Publish(errorEvent);
+            return;
+        }
+
+        if (activeEvent is not null)
+        {
+            Publish(activeEvent);
+        }
+
+        if (readyEvent is not null)
+        {
+            Publish(readyEvent);
+        }
+    }
+
     private async Task HandleSessionOpenAsync(
         SessionOpenWebCommand command,
         CancellationToken cancellationToken)
@@ -2435,6 +2804,7 @@ public sealed partial class AgentDeskHostController :
 
         EngineStatusWebEvent? errorEvent = null;
         HashSet<CancellationTokenSource> runtimeOperationCancellations = [];
+        SupersededPrompt? superseded = null;
         await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -2463,6 +2833,19 @@ public sealed partial class AgentDeskHostController :
                 }
 
                 var targetSession = new SessionId(command.SessionId);
+                // Switching threads always supersedes any in-flight turn on the single sidecar.
+                // Force an engine restart so a previous PromptAsync cannot leave the host busy.
+                if (_promptInProgress ||
+                    (_sessionId is not null &&
+                     !string.Equals(
+                         _sessionId.Value,
+                         targetSession.Value,
+                         StringComparison.Ordinal)))
+                {
+                    superseded = SupersedeInFlightPromptUnsafe();
+                    _restartEngineBeforeNextPrompt = true;
+                }
+
                 var previousClient = _client;
                 var previousSession = _sessionId;
                 var previousMode = _confirmedSessionMode;
@@ -2553,14 +2936,22 @@ public sealed partial class AgentDeskHostController :
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {
-                errorEvent = SetStatusUnsafe("error", EngineErrorMessage, _sessionId?.Value);
+                // Prefer the requested session id so the UI can clear optimistic
+                // switch state even if the engine never activated that session.
+                errorEvent = SetStatusUnsafe(
+                    "error",
+                    EngineErrorMessage,
+                    command.SessionId ?? _sessionId?.Value);
             }
         }
         finally
         {
             _stateGate.Release();
             TryCancel(runtimeOperationCancellations);
+            DisposeSupersededPrompt(superseded);
         }
+
+        await BestEffortCancelSupersededAsync(superseded, cancellationToken).ConfigureAwait(false);
 
         if (errorEvent is not null)
         {
@@ -2835,10 +3226,18 @@ public sealed partial class AgentDeskHostController :
         {
             throw new InvalidOperationException(CloudPolicyExecutionDeniedMessage);
         }
+        // Only reuse the live client when the caller wants the *current* session
+        // (or no specific session). Loading a different saved session must not
+        // return a stale PromptContext pointing at the previous session id.
         if (!_restartEngineBeforeNextPrompt &&
             _client is not null &&
             _sessionId is not null &&
-            _executionProfile == executionProfile)
+            _executionProfile == executionProfile &&
+            (sessionToLoad is null ||
+             string.Equals(
+                 _sessionId.Value,
+                 sessionToLoad.Value,
+                 StringComparison.Ordinal)))
         {
             return new PromptContext(_client, _sessionId, _engineGeneration);
         }
@@ -4096,6 +4495,88 @@ public sealed partial class AgentDeskHostController :
             ? english
             : chinese;
 
+    /// <summary>
+    /// Clears the host-side in-flight prompt markers and forces the next
+    /// <see cref="EnsureEngineAsync"/> call to restart the sidecar. Callers must
+    /// dispose the returned CTS and may best-effort cancel the old engine session.
+    /// </summary>
+    private SupersededPrompt? SupersedeInFlightPromptUnsafe()
+    {
+        if (!_promptInProgress && _promptCancellation is null)
+        {
+            // Still force a restart when switching sessions so a lingering ACP
+            // turn cannot reject the next engine/prompt with BusyMessage.
+            if (_client is not null || _sessionId is not null)
+            {
+                _restartEngineBeforeNextPrompt = true;
+            }
+            return null;
+        }
+
+        var superseded = new SupersededPrompt(_client, _sessionId, _promptCancellation);
+        _promptInProgress = false;
+        _activePromptGeneration = 0;
+        _promptCancellation = null;
+        _restartEngineBeforeNextPrompt = true;
+        return superseded;
+    }
+
+    private static void DisposeSupersededPrompt(SupersededPrompt? superseded)
+    {
+        if (superseded is null)
+        {
+            return;
+        }
+
+        TryCancel(superseded.Cancellation);
+        try
+        {
+            superseded.Cancellation?.Dispose();
+        }
+        catch (Exception)
+        {
+            // Dispose must not interrupt session switching.
+        }
+    }
+
+    private static async Task BestEffortCancelSupersededAsync(
+        SupersededPrompt? superseded,
+        CancellationToken cancellationToken)
+    {
+        if (superseded?.Client is null || superseded.SessionId is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await superseded.Client
+                .CancelAsync(superseded.SessionId, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            // The sidecar may already have been torn down by EnsureEngineAsync.
+        }
+    }
+
+    private sealed class SupersededPrompt
+    {
+        public SupersededPrompt(
+            IEngineClient? client,
+            SessionId? sessionId,
+            CancellationTokenSource? cancellation)
+        {
+            Client = client;
+            SessionId = sessionId;
+            Cancellation = cancellation;
+        }
+
+        public IEngineClient? Client { get; }
+        public SessionId? SessionId { get; }
+        public CancellationTokenSource? Cancellation { get; }
+    }
+
     private static void TryCancel(CancellationTokenSource? cancellation)
     {
         try
@@ -4307,6 +4788,22 @@ public sealed partial class AgentDeskHostController :
             CancellationToken cancellationToken = default)
         {
             _preferences = preferences;
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class InMemoryRecentWorkspaceStore : IRecentWorkspaceStore
+    {
+        private IReadOnlyList<string> _paths = [];
+
+        public Task<IReadOnlyList<string>> LoadAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(_paths);
+
+        public Task SaveAsync(
+            IReadOnlyList<string> paths,
+            CancellationToken cancellationToken = default)
+        {
+            _paths = JsonRecentWorkspaceStore.Normalize(paths);
             return Task.CompletedTask;
         }
     }

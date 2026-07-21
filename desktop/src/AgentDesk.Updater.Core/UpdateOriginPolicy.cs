@@ -36,6 +36,29 @@ public sealed class UpdateOriginPolicy
             "github-releases.githubusercontent.com",
         ]);
 
+    /// <summary>
+    /// Self-hosted community update feed (rkshadow 74 nginx).
+    /// HTTPS only; host must match exactly (no wildcards).
+    /// </summary>
+    public static UpdateOriginPolicy SelfHosted { get; } = new(
+        [
+            "update.rkshadow.com",
+        ]);
+
+    /// <summary>
+    /// Accept either GitHub Release feeds or the self-hosted update host.
+    /// </summary>
+    public static UpdateOriginPolicy Default { get; } = new(
+        [
+            "github.com",
+            "api.github.com",
+            "raw.githubusercontent.com",
+            "objects.githubusercontent.com",
+            "release-assets.githubusercontent.com",
+            "github-releases.githubusercontent.com",
+            "update.rkshadow.com",
+        ]);
+
     public void EnsureAllowedInitialUri(Uri uri) => EnsureAllowed(uri, allowQuery: false);
 
     internal void EnsureAllowedRedirectUri(Uri uri) => EnsureAllowed(uri, allowQuery: true);

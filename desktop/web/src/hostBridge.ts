@@ -433,6 +433,8 @@ export type HostCommand =
       fontScalePercent: FontScalePercent;
     }
   | { type: "workspace/select" }
+  | { type: "workspace/recent/open"; path: string }
+  | { type: "workspace/recent/remove"; path: string }
   | {
       type: "workspace/context/instructions/list";
       requestId: string;
@@ -469,6 +471,10 @@ export type HostCommand =
       type: "session/open";
       sessionId: string;
       workspacePath: string;
+      executionProfile: ExecutionProfile;
+    }
+  | {
+      type: "session/new";
       executionProfile: ExecutionProfile;
     }
   | {
@@ -713,6 +719,7 @@ export type HostEvent =
       capabilities?: EngineCapabilities;
     }
   | { type: "workspace/selected"; path: string; workspaceGeneration: number }
+  | { type: "workspace/recent/changed"; paths: string[] }
   | {
       type: "workspace/context/instructions/list";
       requestId: string;
@@ -1491,6 +1498,12 @@ function parseHostEvent(
           : {}),
         ...optionalEngineCapabilities(value.capabilities)
       };
+    case "workspace/recent/changed":
+      return Array.isArray(value.paths) &&
+        value.paths.every((path) => typeof path === "string" && path.length > 0) &&
+        value.paths.length <= 12
+        ? { type: value.type, paths: value.paths as string[] }
+        : null;
     case "workspace/selected":
       return typeof value.path === "string" && isWorkspaceGeneration(value.workspaceGeneration)
         ? {
@@ -4554,6 +4567,7 @@ const hostEventKeys: Readonly<Record<string, readonly string[]>> = {
     "fileId", "message"
   ],
   "workspace/selected": ["schemaVersion", "type", "path", "workspaceGeneration"],
+  "workspace/recent/changed": ["schemaVersion", "type", "paths"],
   "workspace/context/instructions/list": [
     "schemaVersion", "type", "requestId", "workspaceGeneration", "files"
   ],

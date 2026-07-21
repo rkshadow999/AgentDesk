@@ -37,13 +37,13 @@ param(
     [Parameter(Mandatory)]
     [string]$X64PackagePath,
 
-    [Parameter(Mandatory)]
+    # Optional when publishing an x64-only self-hosted feed.
     [string]$Arm64PackagePath,
 
     [Parameter(Mandatory)]
     [string]$X64UpdaterPath,
 
-    [Parameter(Mandatory)]
+    # Optional when publishing an x64-only self-hosted feed.
     [string]$Arm64UpdaterPath,
 
     [Parameter(Mandatory)]
@@ -53,7 +53,11 @@ param(
     [string]$OutputDirectory,
 
     [string]$PrivateKeyPath,
-    [string]$PrivateKeyEnvironmentVariable
+    [string]$PrivateKeyEnvironmentVariable,
+
+    # Optional HTTPS base used for asset URLs instead of GitHub releases.
+    # Example: https://update.rkshadow.com/releases/v0.1.0-alpha.6
+    [string]$AssetBaseUrl
 )
 
 Set-StrictMode -Version Latest
@@ -70,13 +74,21 @@ function Get-FullPath {
     return [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $Path))
 }
 
+function Test-IsWindowsHost {
+    if (Get-Variable -Name IsWindows -Scope Global -ErrorAction SilentlyContinue) {
+        return [bool]$IsWindows
+    }
+    return [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)
+}
+
 function Test-IsContained {
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$Candidate
     )
 
-    $comparison = if ($IsWindows) {
+    $comparison = if (Test-IsWindowsHost) {
         [System.StringComparison]::OrdinalIgnoreCase
     }
     else {
@@ -97,7 +109,7 @@ function Assert-NoReparsePathSegments {
         [Parameter(Mandatory)][string]$Candidate
     )
 
-    $comparison = if ($IsWindows) {
+    $comparison = if (Test-IsWindowsHost) {
         [System.StringComparison]::OrdinalIgnoreCase
     }
     else {
@@ -274,7 +286,8 @@ function New-ManifestBytes {
         [Parameter(Mandatory)][object[]]$Assets,
         [Parameter(Mandatory)][string]$ManifestRepository,
         [Parameter(Mandatory)][string]$ManifestTag,
-        [string]$EntryPoint
+        [string]$EntryPoint,
+        [string]$AssetBaseUrl
     )
 
     $memory = [System.IO.MemoryStream]::new()
@@ -290,7 +303,12 @@ function New-ManifestBytes {
         $writer.WriteString("version", $ManifestVersion)
         $writer.WriteStartArray("assets")
         foreach ($asset in $Assets) {
-            $url = "https://github.com/$ManifestRepository/releases/download/$ManifestTag/$($asset.Name)"
+            if (-not [string]::IsNullOrWhiteSpace($AssetBaseUrl)) {
+                $url = ($AssetBaseUrl.TrimEnd('/') + '/' + $asset.Name)
+            }
+            else {
+                $url = "https://github.com/$ManifestRepository/releases/download/$ManifestTag/$($asset.Name)"
+            }
             $writer.WriteStartObject()
             $writer.WriteString("architecture", $asset.Architecture)
             $writer.WriteString("url", $url)
@@ -343,6 +361,19 @@ if ($Repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
 }
 if ($Tag -cne "v$Version") {
     throw "The update manifest tag must exactly match v<version>."
+}
+if (-not [string]::IsNullOrWhiteSpace($AssetBaseUrl)) {
+    $assetBaseUri = $null
+    if (-not [Uri]::TryCreate($AssetBaseUrl, [UriKind]::Absolute, [ref]$assetBaseUri)) {
+        throw "AssetBaseUrl must be an absolute HTTPS URI."
+    }
+    if ($assetBaseUri.Scheme -cne [Uri]::UriSchemeHttps -or
+        -not $assetBaseUri.IsDefaultPort -or
+        -not [string]::IsNullOrEmpty($assetBaseUri.UserInfo) -or
+        -not [string]::IsNullOrEmpty($assetBaseUri.Query) -or
+        -not [string]::IsNullOrEmpty($assetBaseUri.Fragment)) {
+        throw "AssetBaseUrl must be a plain HTTPS origin/path without credentials, query, or fragment."
+    }
 }
 
 $hasPrivateKeyPath = -not [string]::IsNullOrWhiteSpace($PrivateKeyPath)
@@ -409,43 +440,50 @@ try {
         -MaximumBytes 1024
 
     $x64FullPath = Get-FullPath $X64PackagePath
-    $arm64FullPath = Get-FullPath $Arm64PackagePath
     $x64UpdaterFullPath = Get-FullPath $X64UpdaterPath
-    $arm64UpdaterFullPath = Get-FullPath $Arm64UpdaterPath
     $expectedX64Name = "AgentDesk-$Version-win-x64-portable.zip"
-    $expectedArm64Name = "AgentDesk-$Version-win-arm64-portable.zip"
     $expectedX64UpdaterName = "AgentDesk-$Version-win-x64-updater.zip"
-    $expectedArm64UpdaterName = "AgentDesk-$Version-win-arm64-updater.zip"
-    $releaseAssets = @(
-        @{
+    $releaseAssets = [System.Collections.Generic.List[object]]::new()
+    $releaseAssets.Add(@{
             Architecture = "x64"
             Kind = "package"
             Path = $x64FullPath
             Name = $expectedX64Name
             Description = "x64 portable update package"
-        },
-        @{
-            Architecture = "arm64"
-            Kind = "package"
-            Path = $arm64FullPath
-            Name = $expectedArm64Name
-            Description = "arm64 portable update package"
-        },
-        @{
+        }) | Out-Null
+    $releaseAssets.Add(@{
             Architecture = "x64"
             Kind = "updater"
             Path = $x64UpdaterFullPath
             Name = $expectedX64UpdaterName
             Description = "x64 updater asset"
-        },
-        @{
-            Architecture = "arm64"
-            Kind = "updater"
-            Path = $arm64UpdaterFullPath
-            Name = $expectedArm64UpdaterName
-            Description = "arm64 updater asset"
-        }
-    )
+        }) | Out-Null
+
+    $hasArm64Package = -not [string]::IsNullOrWhiteSpace($Arm64PackagePath)
+    $hasArm64Updater = -not [string]::IsNullOrWhiteSpace($Arm64UpdaterPath)
+    if ($hasArm64Package -ne $hasArm64Updater) {
+        throw "Provide both Arm64PackagePath and Arm64UpdaterPath, or omit both for an x64-only feed."
+    }
+    if ($hasArm64Package) {
+        $arm64FullPath = Get-FullPath $Arm64PackagePath
+        $arm64UpdaterFullPath = Get-FullPath $Arm64UpdaterPath
+        $expectedArm64Name = "AgentDesk-$Version-win-arm64-portable.zip"
+        $expectedArm64UpdaterName = "AgentDesk-$Version-win-arm64-updater.zip"
+        $releaseAssets.Add(@{
+                Architecture = "arm64"
+                Kind = "package"
+                Path = $arm64FullPath
+                Name = $expectedArm64Name
+                Description = "arm64 portable update package"
+            }) | Out-Null
+        $releaseAssets.Add(@{
+                Architecture = "arm64"
+                Kind = "updater"
+                Path = $arm64UpdaterFullPath
+                Name = $expectedArm64UpdaterName
+                Description = "arm64 updater asset"
+            }) | Out-Null
+    }
     foreach ($asset in $releaseAssets) {
         $information = Get-Item -LiteralPath $asset.Path -Force -ErrorAction SilentlyContinue
         if ($null -eq $information -or
@@ -468,10 +506,13 @@ try {
     }
     $x64UpdaterSnapshot = ($releaseAssets |
         Where-Object { $_.Kind -ceq "updater" -and $_.Architecture -ceq "x64" }).Snapshot
-    $arm64UpdaterSnapshot = ($releaseAssets |
-        Where-Object { $_.Kind -ceq "updater" -and $_.Architecture -ceq "arm64" }).Snapshot
     Assert-UpdaterArchive -Path $x64UpdaterSnapshot.Path -Architecture "x64"
-    Assert-UpdaterArchive -Path $arm64UpdaterSnapshot.Path -Architecture "arm64"
+    $arm64UpdaterSnapshot = ($releaseAssets |
+        Where-Object { $_.Kind -ceq "updater" -and $_.Architecture -ceq "arm64" } |
+        Select-Object -First 1)
+    if ($null -ne $arm64UpdaterSnapshot) {
+        Assert-UpdaterArchive -Path $arm64UpdaterSnapshot.Snapshot.Path -Architecture "arm64"
+    }
 
     $signer = [System.Security.Cryptography.ECDsa]::Create()
     $privateBytesRead = 0
@@ -515,14 +556,16 @@ try {
         -Assets $packageAssets `
         -ManifestRepository $Repository `
         -ManifestTag $Tag `
-        -EntryPoint "AgentDesk.App.exe"
+        -EntryPoint "AgentDesk.App.exe" `
+        -AssetBaseUrl $AssetBaseUrl
     $updaterManifestBytes = New-ManifestBytes `
         -Product "AgentDesk.Updater" `
         -ManifestVersion $Version `
         -Assets $updaterAssets `
         -ManifestRepository $Repository `
         -ManifestTag $Tag `
-        -EntryPoint "AgentDesk.Updater.exe"
+        -EntryPoint "AgentDesk.Updater.exe" `
+        -AssetBaseUrl $AssetBaseUrl
 
     $signatureBytes = $signer.SignData(
         $manifestBytes,

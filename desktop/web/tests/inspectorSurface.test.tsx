@@ -90,6 +90,65 @@ describe("InspectorSurface", () => {
     expect(terminalTab).toHaveFocus();
   });
 
+  it("resets inspector projection when the active session changes", () => {
+    const bridge = new RecordingBridge();
+    render(<InspectorSurface bridge={bridge} runtime={new RecordingRuntime()} />);
+
+    act(() => bridge.emit(sessionUpdate("diff_review", {
+      sessionUpdate: "diff_review",
+      content: [{ type: "diff", path: "src/A.cs", oldText: "a", newText: "b" }]
+    }, "session-a")));
+    expect(screen.getByRole("button", { name: "src/A.cs" })).toBeInTheDocument();
+
+    act(() => bridge.emit({
+      type: "session/active/changed",
+      sessionId: "session-b",
+      workspacePath: "C:\\workspace",
+      engineEpoch: 2
+    }));
+
+    expect(screen.queryByRole("button", { name: "src/A.cs" })).not.toBeInTheDocument();
+    expect(screen.getByText("暂无可审阅更改")).toBeInTheDocument();
+  });
+
+  it("keeps terminal and plan tabs visible after the user pins them while diffs stream in", async () => {
+    const bridge = new RecordingBridge();
+    const runtime = new RecordingRuntime();
+    render(<InspectorSurface bridge={bridge} runtime={runtime} />);
+
+    act(() => bridge.emit(sessionUpdate("diff_review", {
+      sessionUpdate: "diff_review",
+      content: [{ type: "diff", path: "src/A.cs", oldText: "a", newText: "b" }]
+    })));
+    expect(screen.getByRole("tab", { name: "更改" })).toHaveAttribute("aria-selected", "true");
+    expect(document.querySelector(".changes-layout")).toHaveClass("is-active");
+
+    fireEvent.click(screen.getByRole("tab", { name: "终端" }));
+    expect(screen.getByRole("tab", { name: "终端" })).toHaveAttribute("aria-selected", "true");
+    expect(document.querySelector(".terminal-pane")).toHaveClass("is-active");
+    expect(document.querySelector(".changes-layout")).not.toHaveClass("is-active");
+
+    // New diffs must not force the user off the Terminal tab.
+    act(() => bridge.emit(sessionUpdate("diff_review", {
+      sessionUpdate: "diff_review",
+      content: [{ type: "diff", path: "src/B.cs", oldText: "c", newText: "d" }]
+    })));
+    expect(screen.getByRole("tab", { name: "终端" })).toHaveAttribute("aria-selected", "true");
+    expect(document.querySelector(".terminal-pane")).toHaveClass("is-active");
+
+    fireEvent.click(screen.getByRole("tab", { name: "计划" }));
+    act(() => bridge.emit(sessionUpdate("plan", {
+      sessionUpdate: "plan",
+      entries: [
+        { content: "检查终端面板", priority: "high", status: "in_progress" }
+      ]
+    })));
+    expect(screen.getByRole("tab", { name: "计划" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("检查终端面板")).toBeInTheDocument();
+    expect(document.querySelector(".plan-pane")).toHaveClass("is-active");
+    expect(document.querySelector(".changes-layout")).not.toHaveClass("is-active");
+  });
+
   it("mounts Monaco with the selected real diff", async () => {
     const bridge = new RecordingBridge();
     const runtime = new RecordingRuntime();

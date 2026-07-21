@@ -66,7 +66,7 @@ static async Task<int> ApplyAsync(
         cancellationToken).ConfigureAwait(false);
     try
     {
-        using var service = new PortableUpdateService(UpdateOriginPolicy.GitHub);
+        using var service = new PortableUpdateService(UpdateOriginPolicy.Default);
         var staged = await service.CheckAndStageAsync(
             new UpdateCheckRequest(
                 command.ManifestUri,

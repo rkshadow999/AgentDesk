@@ -560,12 +560,25 @@ public sealed partial class MainWindow : Window
 
     private void ConfigureWindowChrome()
     {
+        // Match the dark web workbench even when Windows AppsUseLightTheme=1.
+        // Otherwise title bar / status chrome and WebView2 default fill flash white.
+        if (Content is FrameworkElement root)
+        {
+            root.RequestedTheme = ElementTheme.Dark;
+        }
+
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
 
-        AppWindow.TitleBar.ButtonBackgroundColor = Colors.Transparent;
-        AppWindow.TitleBar.ButtonInactiveBackgroundColor = Colors.Transparent;
-        AppWindow.TitleBar.ButtonHoverBackgroundColor = Windows.UI.Color.FromArgb(20, 127, 127, 127);
+        var titleBar = AppWindow.TitleBar;
+        titleBar.ButtonBackgroundColor = Colors.Transparent;
+        titleBar.ButtonInactiveBackgroundColor = Colors.Transparent;
+        titleBar.ButtonHoverBackgroundColor = Windows.UI.Color.FromArgb(36, 86, 182, 160);
+        titleBar.ButtonPressedBackgroundColor = Windows.UI.Color.FromArgb(64, 86, 182, 160);
+        titleBar.ButtonForegroundColor = Windows.UI.Color.FromArgb(255, 232, 233, 231);
+        titleBar.ButtonInactiveForegroundColor = Windows.UI.Color.FromArgb(255, 155, 162, 158);
+        titleBar.ButtonHoverForegroundColor = Windows.UI.Color.FromArgb(255, 241, 243, 240);
+        titleBar.ButtonPressedForegroundColor = Windows.UI.Color.FromArgb(255, 241, 243, 240);
     }
 
     private void ConfigureWorkspaceStatus()
@@ -1513,10 +1526,15 @@ public sealed partial class MainWindow : Window
     private Task SetModalStateAsync(bool isOpen, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        InspectorWebView.Visibility = isOpen ? Visibility.Collapsed : Visibility.Visible;
+        // Keep the inspector WebView2 visible while modals are open. Collapsing it
+        // under Windows light theme leaves a white hole beside the settings dialog.
+        // Block input only so the workbench modal owns focus and clicks.
+        InspectorWebView.Visibility = Visibility.Visible;
         InspectorWebView.IsHitTestVisible = !isOpen;
         InspectorWebView.IsTabStop = !isOpen;
+        InspectorWebView.Opacity = isOpen ? 0.42 : 1.0;
         InspectorSplitter.IsEnabled = !isOpen;
+        InspectorSplitter.IsHitTestVisible = !isOpen;
         return Task.CompletedTask;
     }
 

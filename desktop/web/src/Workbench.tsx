@@ -38,7 +38,7 @@ import {
   Upload,
   X
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { createTranslator } from "./i18n";
@@ -92,6 +92,30 @@ const defaultProviderBaseUrl = "https://api.x.ai/v1";
 const defaultProviderModel = "grok-build";
 const sessionPageSize = 50;
 const sessionListOverscan = 4;
+const taskSidebarWidthStorageKey = "agentdesk.taskSidebarWidth";
+const defaultTaskSidebarWidth = 300;
+const minimumTaskSidebarWidth = 240;
+const maximumTaskSidebarWidth = 560;
+const taskSidebarWidthStep = 16;
+
+function clampTaskSidebarWidth(value: number): number {
+  if (!Number.isFinite(value)) {
+    return defaultTaskSidebarWidth;
+  }
+  return Math.min(maximumTaskSidebarWidth, Math.max(minimumTaskSidebarWidth, Math.round(value)));
+}
+
+function readStoredTaskSidebarWidth(): number {
+  try {
+    const raw = window.localStorage.getItem(taskSidebarWidthStorageKey);
+    if (raw == null || raw.length === 0) {
+      return defaultTaskSidebarWidth;
+    }
+    return clampTaskSidebarWidth(Number(raw));
+  } catch {
+    return defaultTaskSidebarWidth;
+  }
+}
 const createdWorktreeRefreshAttempts = 6;
 const createdWorktreeRefreshIntervalMs = 500;
 const workspaceContentByteLimit = 512 * 1024;
@@ -120,6 +144,14 @@ type ToolTimelineEntry = {
 };
 
 type ConversationEntry = LiveMessage | ToolTimelineEntry;
+
+/** Per-thread projection cache (Codex Thread-style: keep UI state when switching). */
+type SessionThreadCache = {
+  entries: ConversationEntry[];
+  engineStatus: EngineStatus;
+  engineMessage: string;
+  prompt: string;
+};
 
 type PermissionRequestEvent = Extract<HostEvent, { type: "permission/requested" }>;
 type SessionRewoundEvent = Extract<HostEvent, { type: "session/rewound" }>;
@@ -285,6 +317,8 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   const [workspaceGeneration, setWorkspaceGeneration] = useState(previewMode ? 1 : 0);
   const [workspacePath, setWorkspacePath] = useState(
     previewMode ? "agentdesk-alpha / desktop" : "");
+  const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>(
+    previewMode ? ["agentdesk-alpha / desktop"] : []);
   const [conversationEntries, setConversationEntries] = useState<ConversationEntry[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sessionQuery, setSessionQuery] = useState("");
@@ -381,6 +415,8 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   const [fullAccessEnabled, setFullAccessEnabled] = useState(false);
   const [fontScalePercent, setFontScalePercent] =
     useState<FontScalePercent>(defaultFontScalePercent);
+  const [taskSidebarWidth, setTaskSidebarWidth] = useState(defaultTaskSidebarWidth);
+  const [sidebarDragging, setSidebarDragging] = useState(false);
   const [windowsAutomationHostEnabled, setWindowsAutomationHostEnabled] = useState(false);
   const [windowsAutomationAction, setWindowsAutomationAction] =
     useState<WindowsAutomationAction>("focus-window");
@@ -412,6 +448,7 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   const sendButtonRef = useRef<HTMLButtonElement>(null);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const settingsDialogRef = useRef<HTMLElement>(null);
+  const sidebarDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const settingsInitialFocusRef = useRef<HTMLInputElement>(null);
   const windowsAutomationValueRef = useRef<HTMLInputElement>(null);
   const windowsAutomationPendingRef = useRef<WindowsAutomationPending | undefined>(undefined);
@@ -462,19 +499,40 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   const memoryPendingRequestRef = useRef<MemoryPendingRequest | undefined>(undefined);
   const firstSessionQueryRef = useRef(true);
   const closedSessionIdsRef = useRef(new Set<string>());
+  const conversationEntriesRef = useRef<ConversationEntry[]>([]);
+  const engineStatusRef = useRef<EngineStatus>("idle");
+  const engineMessageRef = useRef("");
+  const promptRef = useRef("");
+  const sessionThreadCacheRef = useRef(new Map<string, SessionThreadCache>());
+  const runningSessionIdsRef = useRef(new Set<string>());
+  const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
+  /** Sessions the user left while a turn was active; host supersedes them — ignore late "running". */
+  const supersededSessionIdsRef = useRef(new Set<string>());
+  const sessionSwitchingRef = useRef(false);
+  const sessionSwitchTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const [pendingSessionHandoff, setPendingSessionHandoff] = useState<
+    | { kind: "open"; session: SessionSummary }
+    | { kind: "new" }
+    | undefined
+  >(undefined);
   const activePermission = permissionQueue[0];
   const nativeRiskOpen = pendingNativePrompt !== undefined;
+  const sessionHandoffOpen = pendingSessionHandoff !== undefined;
   const worktreeModalOpen = worktreeCreateOpen || worktreeApplyTarget !== undefined ||
     worktreeGcOpen;
-  const visiblePermission = settingsOpen || nativeRiskOpen || rewindOpen || worktreeModalOpen
+  const visiblePermission = settingsOpen || nativeRiskOpen || rewindOpen || worktreeModalOpen ||
+    sessionHandoffOpen
     ? undefined
     : activePermission;
   const interactionBlocked = settingsOpen || nativeRiskOpen || rewindOpen || worktreeModalOpen ||
+    sessionHandoffOpen ||
     visiblePermission !== undefined;
   const modalKind = settingsOpen
     ? "settings"
     : nativeRiskOpen
       ? "nativeRisk"
+      : sessionHandoffOpen
+        ? "sessionHandoff"
       : rewindOpen
         ? "rewind"
         : worktreeModalOpen
@@ -489,8 +547,12 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   const currentTaskTitle = activeSession?.title || firstUserMessage || t("newTask");
   const nativeAvailable = executionProfiles.includes("NativeProtected");
   const wslAvailable = executionProfiles.includes("WslStrict");
-  const profileSelectionDisabled = engineStatus === "starting" || engineStatus === "running";
-  const modeSelectionDisabled = profileSelectionDisabled || modeConfirmationPending;
+  // Composer is busy only when the *visible* thread is running a turn.
+  const promptBusy = engineStatus === "starting" || engineStatus === "running";
+  // Profile can be chosen for the next prompt even while a turn runs.
+  // Mode still locks while the active thread is mid-turn to avoid mid-prompt flip-flops.
+  const profileSelectionDisabled = false;
+  const modeSelectionDisabled = promptBusy || modeConfirmationPending;
   const planSelectable = planAvailable !== false;
   const modeAwaitingConfirmation = sessionMode !== confirmedSessionMode;
   const modeStatusMessage = modeConfirmationPending
@@ -510,7 +572,6 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   const providerFormReady = providerBaseUrl.trim().length > 0
     && providerModel.trim().length > 0
     && providerValidationMessage === undefined;
-  const promptBusy = engineStatus === "starting" || engineStatus === "running";
   const maintenanceBusy = maintenanceRequest !== undefined;
   const maintenanceActionsDisabled = promptBusy || maintenanceBusy;
   const windowsAutomationProcessIdValue = parseWindowsProcessId(windowsAutomationProcessId);
@@ -582,6 +643,69 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   useEffect(() => {
     applyFontScalePercent(fontScalePercent);
   }, [fontScalePercent]);
+
+  useEffect(() => {
+    return () => clearSessionSwitchTimeout();
+  }, []);
+
+  useEffect(() => {
+    conversationEntriesRef.current = conversationEntries;
+  }, [conversationEntries]);
+
+  useEffect(() => {
+    engineStatusRef.current = engineStatus;
+  }, [engineStatus]);
+
+  useEffect(() => {
+    engineMessageRef.current = engineMessage;
+  }, [engineMessage]);
+
+  useEffect(() => {
+    promptRef.current = prompt;
+  }, [prompt]);
+
+  useEffect(() => {
+    setTaskSidebarWidth(readStoredTaskSidebarWidth());
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(taskSidebarWidthStorageKey, String(taskSidebarWidth));
+    } catch {
+      // Ignore storage quota / private mode failures.
+    }
+  }, [taskSidebarWidth]);
+
+  useEffect(() => {
+    if (!sidebarDragging) {
+      return;
+    }
+
+    function onPointerMove(event: PointerEvent) {
+      const drag = sidebarDragRef.current;
+      if (!drag) {
+        return;
+      }
+      const next = clampTaskSidebarWidth(drag.startWidth + (event.clientX - drag.startX));
+      setTaskSidebarWidth(next);
+    }
+
+    function endDrag() {
+      sidebarDragRef.current = null;
+      setSidebarDragging(false);
+      document.body.classList.remove("sidebar-resizing");
+    }
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", endDrag);
+    window.addEventListener("pointercancel", endDrag);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", endDrag);
+      window.removeEventListener("pointercancel", endDrag);
+      document.body.classList.remove("sidebar-resizing");
+    };
+  }, [sidebarDragging]);
 
   useEffect(() => {
     if (!preferencesHydrated || !bridge.available) {
@@ -814,16 +938,61 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   function handleHostEvent(event: HostEvent) {
     switch (event.type) {
       case "engine/status":
-        if (event.engineEpoch !== undefined) {
-          if (event.engineEpoch < activeEngineEpochRef.current ||
-              (event.engineEpoch === activeEngineEpochRef.current && event.sessionId &&
-                activeSessionIdRef.current && event.sessionId !== activeSessionIdRef.current)) {
-            break;
+        if (event.engineEpoch !== undefined &&
+            event.engineEpoch < activeEngineEpochRef.current) {
+          break;
+        }
+        if (event.sessionId && supersededSessionIdsRef.current.has(event.sessionId)) {
+          // User already left this thread; late busy/running noise must not paint the UI.
+          if (event.status === "ready" || event.status === "stopped" ||
+              event.status === "error" || event.status === "idle") {
+            supersededSessionIdsRef.current.delete(event.sessionId);
+            markSessionRunning(event.sessionId, false);
+            const cached = sessionThreadCacheRef.current.get(event.sessionId);
+            if (cached) {
+              sessionThreadCacheRef.current.set(event.sessionId, {
+                ...cached,
+                engineStatus: event.status === "ready" || event.status === "idle"
+                  ? "ready"
+                  : event.status,
+                engineMessage: event.message ?? "",
+                entries: cached.entries.map((entry) => entry.type === "message"
+                  ? { ...entry, streaming: false }
+                  : entry)
+              });
+            }
           }
+          break;
+        }
+        if (event.sessionId &&
+            activeSessionIdRef.current &&
+            event.sessionId !== activeSessionIdRef.current) {
+          // Status for a non-focused thread: update sidebar indicators only.
+          if (event.status === "running" || event.status === "starting") {
+            markSessionRunning(event.sessionId, true);
+            closedSessionIdsRef.current.delete(event.sessionId);
+          } else if (event.status === "ready" || event.status === "stopped" ||
+              event.status === "error" || event.status === "idle") {
+            markSessionRunning(event.sessionId, false);
+            const cached = sessionThreadCacheRef.current.get(event.sessionId);
+            if (cached) {
+              sessionThreadCacheRef.current.set(event.sessionId, {
+                ...cached,
+                engineStatus: event.status === "ready" || event.status === "idle"
+                  ? "ready"
+                  : event.status,
+                engineMessage: event.message ?? "",
+                entries: cached.entries.map((entry) => entry.type === "message"
+                  ? { ...entry, streaming: false }
+                  : entry)
+              });
+            }
+          }
+          break;
+        }
+        if (event.engineEpoch !== undefined) {
           activeEngineEpochRef.current = event.engineEpoch;
         }
-        setEngineStatus(event.status);
-        setEngineMessage(event.message ?? "");
         if (event.capabilities) {
           const reportedProfiles = event.capabilities.executionProfiles;
           executionProfilesRef.current = reportedProfiles;
@@ -834,9 +1003,44 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
             : reportedProfiles[0] ?? "NativeProtected");
         }
         if (event.sessionId) {
-          updateActiveSessionId(event.sessionId);
+          if (event.sessionId !== activeSessionIdRef.current) {
+            updateActiveSessionId(event.sessionId);
+          }
+          if (event.status === "running" || event.status === "starting") {
+            markSessionRunning(event.sessionId, true);
+            closedSessionIdsRef.current.delete(event.sessionId);
+          } else if (event.status === "ready" || event.status === "stopped" ||
+              event.status === "error" || event.status === "idle") {
+            markSessionRunning(event.sessionId, false);
+            endSessionSwitch();
+          }
+        } else if (event.status === "ready" || event.status === "idle" ||
+            event.status === "error" || event.status === "stopped") {
+          endSessionSwitch();
+        }
+        // Apply status after thread id is aligned so cache restore cannot clobber it.
+        setEngineStatus(event.status);
+        setEngineMessage(event.message ?? "");
+        // Persist status into the active thread cache for correct restore later.
+        if (event.sessionId) {
+          const cached = sessionThreadCacheRef.current.get(event.sessionId);
+          if (cached) {
+            sessionThreadCacheRef.current.set(event.sessionId, {
+              ...cached,
+              engineStatus: event.status,
+              engineMessage: event.message ?? ""
+            });
+          } else if (event.sessionId === activeSessionIdRef.current) {
+            sessionThreadCacheRef.current.set(event.sessionId, {
+              entries: conversationEntriesRef.current,
+              engineStatus: event.status,
+              engineMessage: event.message ?? "",
+              prompt: promptRef.current
+            });
+          }
         }
         if (event.status === "stopped" || event.status === "error") {
+          endSessionSwitch();
           resetMemoryBrowserState(false);
           updateModeConfirmationPending(false);
           setConfirmedSessionMode("default");
@@ -853,13 +1057,15 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
           }
           if (event.sessionId) {
             closedSessionIdsRef.current.add(event.sessionId);
+            markSessionRunning(event.sessionId, false);
           }
           setPermissionQueue((requests) => event.sessionId
             ? requests.filter((request) => request.sessionId !== event.sessionId)
             : []);
-        } else if (event.status === "running" && event.sessionId) {
-          closedSessionIdsRef.current.delete(event.sessionId);
         }
+        break;
+      case "workspace/recent/changed":
+        setRecentWorkspaces(event.paths);
         break;
       case "workspace/selected":
         const sameWorkspace = workspacePathRef.current.length > 0 &&
@@ -1199,28 +1405,65 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
         break;
       }
       case "session/update":
-        if (event.engineEpoch < activeEngineEpochRef.current ||
-            (activeSessionIdRef.current && event.sessionId !== activeSessionIdRef.current)) {
+        if (event.engineEpoch < activeEngineEpochRef.current) {
           break;
         }
-        activeEngineEpochRef.current = event.engineEpoch;
-        updateActiveSessionId(event.sessionId);
+        // Drop late stream fragments from a thread the user already left.
+        if (supersededSessionIdsRef.current.has(event.sessionId) &&
+            event.sessionId !== activeSessionIdRef.current) {
+          break;
+        }
+        // Always project tool/message updates into the owning thread cache (Codex-style).
+        if (event.sessionId === activeSessionIdRef.current) {
+          activeEngineEpochRef.current = event.engineEpoch;
+        }
         if (event.updateKind === "tool_call" || event.updateKind === "tool_call_update") {
-          appendToolUpdate(event.update);
+          appendToolUpdate(event.update, event.sessionId);
         }
         if (event.text) {
-          appendAssistantChunk(event.text);
+          // Engine echoes the submitted prompt as user_message_chunk; the workbench
+          // already optimistically appends that user turn in dispatchPrompt.
+          if (event.updateKind === "user_message_chunk") {
+            break;
+          }
+          if (event.updateKind === "agent_message_chunk" ||
+              event.updateKind === "agent_thought_chunk" ||
+              !event.updateKind) {
+            appendAssistantChunk(event.text, event.sessionId);
+          }
         }
         break;
       case "prompt/completed":
-        updateModeConfirmationPending(false);
-        setEngineStatus("ready");
-        updateActiveSessionId(event.sessionId);
+        supersededSessionIdsRef.current.delete(event.sessionId);
+        markSessionRunning(event.sessionId, false);
         setPermissionQueue((requests) =>
           requests.filter((request) => request.sessionId !== event.sessionId));
-        setConversationEntries((entries) => entries.map((entry) => entry.type === "message"
-          ? { ...entry, streaming: false }
-          : entry));
+        updateConversationForSession(event.sessionId, (entries) => entries.map((entry) =>
+          entry.type === "message" ? { ...entry, streaming: false } : entry));
+        // Unlock the composer when the focused thread finishes, or when the first
+        // turn completes before the host has bound an active session id.
+        if (!activeSessionIdRef.current ||
+            event.sessionId === activeSessionIdRef.current) {
+          updateModeConfirmationPending(false);
+          engineStatusRef.current = "ready";
+          setEngineStatus("ready");
+          engineMessageRef.current = "";
+          setEngineMessage("");
+          endSessionSwitch();
+        }
+        {
+          const cached = sessionThreadCacheRef.current.get(event.sessionId);
+          if (cached) {
+            sessionThreadCacheRef.current.set(event.sessionId, {
+              ...cached,
+              engineStatus: "ready",
+              engineMessage: "",
+              entries: cached.entries.map((entry) => entry.type === "message"
+                ? { ...entry, streaming: false }
+                : entry)
+            });
+          }
+        }
         break;
       case "session/list/changed": {
         const request = sessionListRequestRef.current;
@@ -1254,24 +1497,37 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
       }
       case "session/active/changed": {
         const previousSessionId = activeSessionIdRef.current;
-        if (event.engineEpoch < activeEngineEpochRef.current ||
-            (event.engineEpoch === activeEngineEpochRef.current &&
-              previousSessionId && previousSessionId !== event.sessionId)) {
+        if (event.engineEpoch < activeEngineEpochRef.current) {
           break;
         }
         activeEngineEpochRef.current = event.engineEpoch;
-        updateActiveSessionId(event.sessionId);
         if (previousSessionId && previousSessionId !== event.sessionId) {
-          setConversationEntries([]);
-          setPermissionQueue([]);
+          finalizeSupersededThread(previousSessionId);
+          setPermissionQueue((requests) =>
+            requests.filter((request) => request.sessionId === event.sessionId));
           clearPendingAttachments();
           if (rewindSessionIdRef.current && rewindSessionIdRef.current !== event.sessionId) {
             closeRewind();
           }
         }
+        updateActiveSessionId(event.sessionId);
+        // Host always finishes open/new with a ready session; clear busy lock for input.
+        setEngineStatus("ready");
+        setEngineMessage("");
+        markSessionRunning(event.sessionId, false);
+        endSessionSwitch();
+        supersededSessionIdsRef.current.delete(event.sessionId);
+        const cached = sessionThreadCacheRef.current.get(event.sessionId);
+        if (cached) {
+          sessionThreadCacheRef.current.set(event.sessionId, {
+            ...cached,
+            engineStatus: "ready",
+            engineMessage: ""
+          });
+        }
         setWorkspacePath(event.workspacePath);
         setWorkspaceReady(true);
-        setNativeRiskAcknowledged(false);
+        // Keep native risk acknowledgement for the same workspace across thread switches.
         setPendingNativePrompt(undefined);
         break;
       }
@@ -1752,6 +2008,9 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
       }
       case "ui/preferences/changed": {
         setLanguage(event.language);
+        // Keep the ref in sync inside the same host-event turn so a following
+        // engine/status session bind does not wipe a just-restored draft.
+        promptRef.current = event.composerDraft;
         setPrompt(event.composerDraft);
         updateSessionMode(event.sessionMode);
         setExecutionProfile(event.executionProfile);
@@ -1802,15 +2061,19 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
     }
   }
 
-  function appendAssistantChunk(text: string) {
-    setConversationEntries((entries) => {
+  function appendAssistantChunk(text: string, sessionId?: string) {
+    // Allocate the id outside the state updater: React StrictMode may invoke
+    // updater functions twice, and ++nextLiveMessageId would skip/duplicate ids.
+    const messageId = `message-${++nextLiveMessageId}`;
+    const targetSessionId = sessionId ?? activeSessionIdRef.current;
+    updateConversationForSession(targetSessionId, (entries) => {
       const last = entries.at(-1);
       if (last?.type === "message" && last.role === "assistant" && last.streaming) {
         return [...entries.slice(0, -1), { ...last, text: last.text + text }];
       }
       return [...entries, {
         type: "message",
-        id: `message-${++nextLiveMessageId}`,
+        id: messageId,
         role: "assistant",
         text,
         streaming: true
@@ -1818,13 +2081,14 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
     });
   }
 
-  function appendToolUpdate(value: unknown) {
+  function appendToolUpdate(value: unknown, sessionId?: string) {
     const update = asRecord(value);
     const toolCallId = update && nonEmptyString(update.toolCallId);
     if (!update || !toolCallId) {
       return;
     }
-    setConversationEntries((entries) => {
+    const targetSessionId = sessionId ?? activeSessionIdRef.current;
+    updateConversationForSession(targetSessionId, (entries) => {
       const existingIndex = entries.findIndex(
         (entry) => entry.type === "tool" && entry.toolCallId === toolCallId
       );
@@ -2401,16 +2665,174 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
     setRewindError("");
   }
 
-  function openSession(session: SessionSummary) {
-    if (engineStatus === "starting" || engineStatus === "running") {
+  function clearSessionSwitchTimeout() {
+    if (sessionSwitchTimeoutRef.current !== undefined) {
+      clearTimeout(sessionSwitchTimeoutRef.current);
+      sessionSwitchTimeoutRef.current = undefined;
+    }
+  }
+
+  function beginSessionSwitch(timeoutMessage: string) {
+    clearSessionSwitchTimeout();
+    sessionSwitchingRef.current = true;
+    // Fail open: never leave the UI permanently unable to switch sessions.
+    sessionSwitchTimeoutRef.current = setTimeout(() => {
+      if (!sessionSwitchingRef.current) {
+        return;
+      }
+      sessionSwitchingRef.current = false;
+      setEngineStatus((status) => status === "starting" ? "ready" : status);
+      setEngineMessage((message) => message === t("switchingSession") ||
+        message === t("engineStarting")
+        ? timeoutMessage
+        : message);
+    }, 20_000);
+  }
+
+  function endSessionSwitch() {
+    clearSessionSwitchTimeout();
+    sessionSwitchingRef.current = false;
+  }
+
+  function finalizeSupersededThread(sessionId: string | undefined) {
+    if (!sessionId) {
       return;
     }
+    supersededSessionIdsRef.current.add(sessionId);
+    markSessionRunning(sessionId, false);
+    const cached = sessionThreadCacheRef.current.get(sessionId);
+    if (!cached) {
+      return;
+    }
+    sessionThreadCacheRef.current.set(sessionId, {
+      ...cached,
+      engineStatus: "ready",
+      engineMessage: "",
+      entries: cached.entries.map((entry) => entry.type === "message"
+        ? { ...entry, streaming: false }
+        : entry)
+    });
+  }
+
+  function isActiveThreadBusy() {
+    const id = activeSessionIdRef.current;
+    return Boolean(
+      id &&
+      (engineStatusRef.current === "running" ||
+        engineStatusRef.current === "starting" ||
+        runningSessionIdsRef.current.has(id))
+    );
+  }
+
+  function performOpenSession(session: SessionSummary) {
+    if (!bridge.available) {
+      return;
+    }
+    if (session.sessionId === activeSessionIdRef.current) {
+      setActiveSurface("conversation");
+      return;
+    }
+    // Codex-style: switching is always allowed. Optimistically project the target
+    // thread and ask the host to supersede any in-flight turn on the single sidecar.
+    const previousId = activeSessionIdRef.current;
+    snapshotActiveThreadCache();
+    finalizeSupersededThread(previousId);
+    beginSessionSwitch(t("sessionSwitchFailed"));
+    setPendingSessionHandoff(undefined);
+    setActiveSurface("conversation");
+    setPermissionQueue((requests) =>
+      requests.filter((request) => request.sessionId === session.sessionId));
+    clearPendingAttachments();
+
+    activeSessionIdRef.current = session.sessionId;
+    setActiveSessionId(session.sessionId);
+    const cached = sessionThreadCacheRef.current.get(session.sessionId);
+    if (cached) {
+      setConversationEntries(cached.entries.map((entry) => entry.type === "message"
+        ? { ...entry, streaming: false }
+        : entry));
+      setPrompt(cached.prompt);
+    } else {
+      setConversationEntries([]);
+      setPrompt("");
+    }
+    // Target thread is idle for input until the host finishes loading it.
+    setEngineStatus("starting");
+    setEngineMessage(t("switchingSession"));
+    markSessionRunning(session.sessionId, false);
+
     bridge.send({
       type: "session/open",
       sessionId: session.sessionId,
       workspacePath: session.workspacePath,
       executionProfile
     });
+  }
+
+  function openSession(session: SessionSummary) {
+    if (!bridge.available) {
+      return;
+    }
+    if (session.sessionId === activeSessionIdRef.current) {
+      setActiveSurface("conversation");
+      return;
+    }
+    if (isActiveThreadBusy()) {
+      setPendingSessionHandoff({ kind: "open", session });
+      return;
+    }
+    performOpenSession(session);
+  }
+
+  function performStartNewSession() {
+    if (!workspaceReady || !bridge.available) {
+      return;
+    }
+    const previousId = activeSessionIdRef.current;
+    snapshotActiveThreadCache();
+    finalizeSupersededThread(previousId);
+    beginSessionSwitch(t("newSessionFailed"));
+    setPendingSessionHandoff(undefined);
+    setPermissionQueue([]);
+    clearPendingAttachments();
+    setActiveSurface("conversation");
+    // Leave activeSessionId until host assigns the new id so events for the old
+    // thread do not paint onto an empty "new" projection.
+    setConversationEntries([]);
+    setPrompt("");
+    setEngineStatus("starting");
+    setEngineMessage(t("engineStarting"));
+    bridge.send({
+      type: "session/new",
+      executionProfile
+    });
+  }
+
+  function startNewSession() {
+    if (!workspaceReady || !bridge.available) {
+      return;
+    }
+    if (isActiveThreadBusy()) {
+      setPendingSessionHandoff({ kind: "new" });
+      return;
+    }
+    performStartNewSession();
+  }
+
+  function confirmSessionHandoff() {
+    const handoff = pendingSessionHandoff;
+    if (!handoff) {
+      return;
+    }
+    if (handoff.kind === "open") {
+      performOpenSession(handoff.session);
+      return;
+    }
+    performStartNewSession();
+  }
+
+  function cancelSessionHandoff() {
+    setPendingSessionHandoff(undefined);
   }
 
   function startSessionRename(
@@ -2449,8 +2871,135 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
     setSessionTitleDraft("");
   }
 
+  function snapshotActiveThreadCache() {
+    const currentId = activeSessionIdRef.current;
+    if (!currentId) {
+      return;
+    }
+    const entries = conversationEntriesRef.current;
+    const existing = sessionThreadCacheRef.current.get(currentId);
+    // Never clobber a non-empty thread cache with an empty projection while switching
+    // (startNewSession clears the visible transcript before the host confirms the new id).
+    if (existing && existing.entries.length > 0 && entries.length === 0) {
+      sessionThreadCacheRef.current.set(currentId, {
+        ...existing,
+        engineStatus: engineStatusRef.current === "starting"
+          ? existing.engineStatus
+          : engineStatusRef.current,
+        engineMessage: engineMessageRef.current || existing.engineMessage,
+        prompt: promptRef.current || existing.prompt
+      });
+      return;
+    }
+    sessionThreadCacheRef.current.set(currentId, {
+      entries,
+      engineStatus: engineStatusRef.current,
+      engineMessage: engineMessageRef.current,
+      prompt: promptRef.current
+    });
+  }
+
+  function markSessionRunning(sessionId: string | undefined, running: boolean) {
+    if (!sessionId) {
+      return;
+    }
+    const next = new Set(runningSessionIdsRef.current);
+    if (running) {
+      next.add(sessionId);
+    } else {
+      next.delete(sessionId);
+    }
+    runningSessionIdsRef.current = next;
+    setRunningSessionIds(next);
+  }
+
+  function applyThreadCache(sessionId: string | undefined) {
+    if (!sessionId) {
+      setConversationEntries([]);
+      return;
+    }
+    const cached = sessionThreadCacheRef.current.get(sessionId);
+    if (cached) {
+      setConversationEntries(cached.entries.map((entry) => entry.type === "message"
+        ? { ...entry, streaming: false }
+        : entry));
+      // Never rehydrate a cached "running" onto the focused composer — only the
+      // live host status for this session may lock the input.
+      const restoredStatus =
+        cached.engineStatus === "running" || cached.engineStatus === "starting"
+          ? "ready"
+          : cached.engineStatus;
+      setEngineStatus(restoredStatus);
+      setEngineMessage(
+        restoredStatus === "ready" ? "" : cached.engineMessage);
+      // Prefer live composer draft when the cache has no prompt (first bind after
+      // preferences hydrate, or optimistic send before a session id existed).
+      setPrompt(cached.prompt || promptRef.current);
+      return;
+    }
+    // Adopting a brand-new session id onto the current unbound projection: keep
+    // optimistic first-turn messages and the live composer draft instead of wiping.
+    const liveEntries = conversationEntriesRef.current;
+    if (liveEntries.length > 0 || promptRef.current) {
+      sessionThreadCacheRef.current.set(sessionId, {
+        entries: liveEntries,
+        engineStatus: engineStatusRef.current,
+        engineMessage: engineMessageRef.current,
+        prompt: promptRef.current
+      });
+      return;
+    }
+    // Fresh thread projection: empty transcript. Leave engineStatus to the
+    // caller (e.g. engine/status) so a concurrent "running" event is not clobbered.
+    setConversationEntries([]);
+    setPrompt("");
+  }
+
+  function updateConversationForSession(
+    sessionId: string | undefined,
+    updater: (entries: ConversationEntry[]) => ConversationEntry[]
+  ) {
+    // Paint on the visible thread when:
+    // - the update has no owner yet (optimistic user bubble before host assigns id)
+    // - no session is focused (first-turn stream before engine/status binds id)
+    // - the update belongs to the focused session
+    const paintVisible =
+      !sessionId ||
+      !activeSessionIdRef.current ||
+      sessionId === activeSessionIdRef.current;
+
+    if (paintVisible) {
+      setConversationEntries((entries) => {
+        const next = updater(entries);
+        conversationEntriesRef.current = next;
+        if (sessionId) {
+          const existing = sessionThreadCacheRef.current.get(sessionId);
+          sessionThreadCacheRef.current.set(sessionId, {
+            entries: next,
+            engineStatus: existing?.engineStatus ?? engineStatusRef.current,
+            engineMessage: existing?.engineMessage ?? engineMessageRef.current,
+            prompt: existing?.prompt ?? promptRef.current
+          });
+        }
+        return next;
+      });
+      return;
+    }
+
+    const existing = sessionThreadCacheRef.current.get(sessionId);
+    const previousEntries = existing?.entries ?? [];
+    sessionThreadCacheRef.current.set(sessionId, {
+      entries: updater(previousEntries),
+      engineStatus: existing?.engineStatus ?? "ready",
+      engineMessage: existing?.engineMessage ?? "",
+      prompt: existing?.prompt ?? ""
+    });
+  }
+
   function updateActiveSessionId(sessionId: string | undefined) {
-    if (activeSessionIdRef.current !== sessionId) {
+    const previousId = activeSessionIdRef.current;
+    if (previousId !== sessionId) {
+      snapshotActiveThreadCache();
       setBackgroundTasks([]);
       setRunningSubagents([]);
       setRuntimeDashboardError("");
@@ -2463,6 +3012,10 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
       setMemoryMessage("");
       resetMemoryBrowserState(memoryCapabilitiesSessionRef.current === sessionId);
       runtimeDashboardRequestSessionRef.current = undefined;
+      activeSessionIdRef.current = sessionId;
+      setActiveSessionId(sessionId);
+      applyThreadCache(sessionId);
+      return;
     }
     activeSessionIdRef.current = sessionId;
     setActiveSessionId(sessionId);
@@ -2563,13 +3116,19 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
       "{count}",
       String(submission.attachments.length)
     );
-    setConversationEntries((entries) => [...entries, {
+    const userMessageId = `message-${++nextLiveMessageId}`;
+    const sessionId = activeSessionIdRef.current;
+    updateConversationForSession(sessionId, (entries) => [...entries, {
       type: "message",
-      id: `message-${++nextLiveMessageId}`,
+      id: userMessageId,
       role: "user",
       text: displayText
     }]);
+    if (sessionId) {
+      markSessionRunning(sessionId, true);
+    }
     if (submission.source === "composer") {
+      promptRef.current = "";
       setPrompt("");
       setReferencedFiles([]);
       setFileSearchResults([]);
@@ -2581,7 +3140,9 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
       setActiveSurface("conversation");
     }
     setEngineStatus("starting");
+    engineStatusRef.current = "starting";
     setEngineMessage(t("engineStarting"));
+    engineMessageRef.current = t("engineStarting");
   }
 
   function selectImageAttachments() {
@@ -3006,6 +3567,31 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
     bridge.send({ type: "workspace/select" });
   }
 
+  function openRecentWorkspace(path: string) {
+    if (!path || engineStatus === "starting" || engineStatus === "running") {
+      return;
+    }
+    if (workspacePathRef.current && sameWorkspacePath(path, workspacePathRef.current)) {
+      return;
+    }
+    setNativeRiskAcknowledged(false);
+    setPendingNativePrompt(undefined);
+    bridge.send({ type: "workspace/recent/open", path });
+  }
+
+  function removeRecentWorkspace(path: string) {
+    if (!path || !bridge.available) {
+      return;
+    }
+    bridge.send({ type: "workspace/recent/remove", path });
+  }
+
+  function workspaceDisplayName(path: string): string {
+    const normalized = path.replace(/[\\/]+$/u, "");
+    const parts = normalized.split(/[\\/]/u).filter(Boolean);
+    return parts.at(-1) || path;
+  }
+
   function saveProvider() {
     const baseUrl = providerBaseUrl.trim();
     const model = providerModel.trim();
@@ -3189,8 +3775,33 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
     </button>
   ) : undefined;
 
+  function beginSidebarResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    sidebarDragRef.current = {
+      startX: event.clientX,
+      startWidth: taskSidebarWidth
+    };
+    setSidebarDragging(true);
+    document.body.classList.add("sidebar-resizing");
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function nudgeSidebarWidth(delta: number) {
+    setTaskSidebarWidth((current) => clampTaskSidebarWidth(current + delta));
+  }
+
+  function resetSidebarWidth() {
+    setTaskSidebarWidth(defaultTaskSidebarWidth);
+  }
+
   return (
-    <div className="app-shell">
+    <div
+      className="app-shell"
+      style={{ ["--task-sidebar-width" as string]: `${taskSidebarWidth}px` }}
+    >
       <aside
         className="tool-rail"
         aria-label={t("mainToolbar")}
@@ -3238,10 +3849,51 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
         aria-hidden={interactionBlocked || undefined}
         inert={interactionBlocked || undefined}
       >
+        <button
+          type="button"
+          className="sidebar-splitter"
+          aria-label={t("resizeSidebar")}
+          title={t("resizeSidebarHelp")}
+          aria-orientation="vertical"
+          aria-valuemin={minimumTaskSidebarWidth}
+          aria-valuemax={maximumTaskSidebarWidth}
+          aria-valuenow={taskSidebarWidth}
+          data-dragging={sidebarDragging ? "true" : undefined}
+          disabled={interactionBlocked}
+          onPointerDown={beginSidebarResize}
+          onDoubleClick={(event) => {
+            event.preventDefault();
+            resetSidebarWidth();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowLeft") {
+              event.preventDefault();
+              nudgeSidebarWidth(-taskSidebarWidthStep);
+            } else if (event.key === "ArrowRight") {
+              event.preventDefault();
+              nudgeSidebarWidth(taskSidebarWidthStep);
+            } else if (event.key === "Home") {
+              event.preventDefault();
+              resetSidebarWidth();
+            }
+          }}
+        />
         <div className="sidebar-header">
           <div>
             <span className="product-name">AgentDesk</span>
             <span className="channel-label">ALPHA</span>
+          </div>
+          <div className="sidebar-header-actions">
+            <button
+              type="button"
+              className="icon-button compact"
+              aria-label={t("newSessionLabel")}
+              title={t("newSession")}
+              disabled={!workspaceReady || !bridge.available}
+              onClick={startNewSession}
+            >
+              <Plus size={15} />
+            </button>
           </div>
         </div>
 
@@ -3292,192 +3944,262 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
           role="tabpanel"
           aria-labelledby={archivedSessionsView ? "archived-sessions-tab" : "active-sessions-tab"}
         >
+          <div className="recent-workspaces" aria-label={t("recentWorkspaces")}>
+            <div className="recent-workspaces-header">
+              <span>{t("recentWorkspaces")}</span>
+              <button
+                type="button"
+                className="icon-button compact"
+                aria-label={workspaceReady ? t("switchWorkspace") : t("addWorkspace")}
+                title={workspaceReady ? t("switchWorkspace") : t("addWorkspace")}
+                disabled={engineStatus === "starting" || engineStatus === "running"}
+                onClick={selectWorkspace}
+              >
+                <FolderKanban size={14} />
+              </button>
+            </div>
+            {recentWorkspaces.length === 0 ? (
+              <p className="recent-workspaces-empty">{t("noRecentWorkspaces")}</p>
+            ) : (
+              <div className="recent-workspace-list">
+                {recentWorkspaces.map((path) => {
+                  const isCurrent = workspacePath.length > 0 &&
+                    sameWorkspacePath(path, workspacePath);
+                  return (
+                    <div className="recent-workspace-item" key={path}>
+                      <button
+                        type="button"
+                        className={`recent-workspace-open${isCurrent ? " active" : ""}`}
+                        title={path}
+                        aria-label={t("openRecentWorkspace").replace("{path}", path)}
+                        aria-current={isCurrent ? "true" : undefined}
+                        disabled={engineStatus === "starting" || engineStatus === "running"}
+                        onClick={() => openRecentWorkspace(path)}
+                      >
+                        <FolderKanban size={13} aria-hidden="true" />
+                        <span>{workspaceDisplayName(path)}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="recent-workspace-remove"
+                        aria-label={t("removeRecentWorkspace").replace("{path}", path)}
+                        title={t("removeRecentWorkspace").replace("{path}", path)}
+                        onClick={() => removeRecentWorkspace(path)}
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {!workspaceReady && (
+              <button
+                type="button"
+                className="load-more-sessions"
+                onClick={selectWorkspace}
+              >
+                <FolderKanban size={13} />
+                <span>{t("selectWorkspace")}</span>
+              </button>
+            )}
+          </div>
+
           <div className="section-heading">
             <span>{t("sessions")}</span>
             {sessionListStatus === "loaded" && sessions.length > 0 && (
               <span className="session-count">{sessions.length}</span>
             )}
           </div>
-          <div className={sessionListStatus === "loaded" && sessions.length > 0
-            ? "session-list-shell"
-            : "session-list"}>
-            {!workspaceReady && (
-              <>
-                <p className="session-empty">{t("workspaceNotSelected")}</p>
-                <button
-                  type="button"
-                  className="load-more-sessions"
-                  onClick={selectWorkspace}
-                >
-                  <FolderKanban size={13} />
-                  <span>{t("selectWorkspace")}</span>
-                </button>
-              </>
-            )}
-            {workspaceReady && sessionListStatus === "loading" && (
-              <div
-                className="session-list-state"
-                role={activeSurface === "conversation" ? "status" : undefined}
-              >
-                <LoaderCircle className="session-spinner" size={14} />
-                <span>{t("loadingSessions")}</span>
-              </div>
-            )}
-            {workspaceReady && sessionListStatus === "error" && (
-              <div className="session-list-error" role="alert">
-                <span>{sessionListError || t("sessionListError")}</span>
-                <button type="button" onClick={() => requestSessionList()}>
-                  <RefreshCw size={12} />
-                  <span>{t("retry")}</span>
-                </button>
-              </div>
-            )}
-            {workspaceReady && sessionListStatus === "loaded" && sessions.length === 0 && (
-              <>
-                <p className="session-empty">
-                  {t(archivedSessionsView ? "noArchivedSessions" : "noSessions")}
-                </p>
-                {loadMoreSessionsButton}
-              </>
-            )}
-            {workspaceReady && sessionListStatus === "loaded" && sessions.length > 0 && (
-              <VirtualizedList
-                className="session-list"
-                items={sessions}
-                getKey={(session) => session.sessionId}
-                rowHeight={sessionRowHeightForScale(fontScalePercent)}
-                overscan={sessionListOverscan}
-                ariaLabel={t("sessions")}
-                renderItem={(session, index) => {
-                  const active = session.sessionId === activeSessionId;
-                  const editing = session.sessionId === editingSessionId;
-                  const archiving = archivingSessionIds.has(session.sessionId);
-                  const forking = forkingSessionIds.has(session.sessionId);
-                  return (
-                    <div className={`session-item${active ? " active" : ""}`}>
-                  {editing ? (
-                    <form
-                      className="session-rename-form"
-                      onSubmit={(event) => {
+
+          {workspaceReady && sessionListStatus === "loading" && (
+            <div
+              className="session-list-state"
+              role={activeSurface === "conversation" ? "status" : undefined}
+            >
+              <LoaderCircle className="session-spinner" size={14} />
+              <span>{t("loadingSessions")}</span>
+            </div>
+          )}
+          {workspaceReady && sessionListStatus === "error" && (
+            <div className="session-list-error" role="alert">
+              <span>{sessionListError || t("sessionListError")}</span>
+              <button type="button" onClick={() => requestSessionList()}>
+                <RefreshCw size={12} />
+                <span>{t("retry")}</span>
+              </button>
+            </div>
+          )}
+          {workspaceReady && sessionListStatus === "loaded" && sessions.length === 0 && (
+            <>
+              <p className="session-empty">
+                {t(archivedSessionsView ? "noArchivedSessions" : "noSessions")}
+              </p>
+              {loadMoreSessionsButton}
+            </>
+          )}
+          {workspaceReady && sessionListStatus === "loaded" && sessions.length > 0 && (
+            <VirtualizedList
+              className="session-list"
+              items={sessions}
+              getKey={(session) => session.sessionId}
+              rowHeight={sessionRowHeightForScale(fontScalePercent)}
+              overscan={sessionListOverscan}
+              ariaLabel={t("sessions")}
+              renderItem={(session, index) => {
+                const active = session.sessionId === activeSessionId;
+                const editing = session.sessionId === editingSessionId;
+                const archiving = archivingSessionIds.has(session.sessionId);
+                const forking = forkingSessionIds.has(session.sessionId);
+                return (
+                  <div className={`session-item${active ? " active" : ""}`}>
+                {editing ? (
+                  <form
+                    className="session-rename-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      saveSessionRename(session);
+                    }}
+                  >
+                    <input
+                      ref={renameInputRef}
+                      aria-label={t("sessionTitle")}
+                      value={sessionTitleDraft}
+                      maxLength={160}
+                      onChange={(event) => setSessionTitleDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (!event.nativeEvent.isComposing && event.key === "Enter") {
+                          event.preventDefault();
+                          saveSessionRename(session);
+                        } else if (event.key === "Escape") {
+                          event.preventDefault();
+                          closeSessionRename();
+                        }
+                      }}
+                    />
+                    <button
+                      type="submit"
+                      aria-label={t("saveRename")}
+                      title={t("saveRename")}
+                      disabled={!sessionTitleDraft.trim()}
+                    ><Check size={13} /></button>
+                    <button
+                      type="button"
+                      aria-label={t("cancelRename")}
+                      title={t("cancelRename")}
+                      onClick={closeSessionRename}
+                    ><X size={13} /></button>
+                  </form>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className="session-row"
+                      data-virtual-index={index}
+                      data-session-focus-id={session.sessionId}
+                      data-session-focus-target="row"
+                      aria-label={t("openSessionLabel").replace("{title}", session.title)}
+                      title={active ? undefined : t("sessionClickHint")}
+                      aria-current={active ? "page" : undefined}
+                      onClick={() => openSession(session)}
+                      onContextMenu={(event) => {
                         event.preventDefault();
-                        saveSessionRename(session);
+                        startSessionRename(session, "row");
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          openSession(session);
+                        }
                       }}
                     >
-                      <input
-                        ref={renameInputRef}
-                        aria-label={t("sessionTitle")}
-                        value={sessionTitleDraft}
-                        maxLength={160}
-                        onChange={(event) => setSessionTitleDraft(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (!event.nativeEvent.isComposing && event.key === "Enter") {
-                            event.preventDefault();
-                            saveSessionRename(session);
-                          } else if (event.key === "Escape") {
-                            event.preventDefault();
-                            closeSessionRename();
-                          }
-                        }}
+                      <span
+                        className={`session-active-marker${
+                          runningSessionIds.has(session.sessionId) ? " running" : ""}`}
+                        aria-hidden="true"
                       />
-                      <button
-                        type="submit"
-                        aria-label={t("saveRename")}
-                        title={t("saveRename")}
-                        disabled={!sessionTitleDraft.trim()}
-                      ><Check size={13} /></button>
-                      <button
-                        type="button"
-                        aria-label={t("cancelRename")}
-                        title={t("cancelRename")}
-                        onClick={closeSessionRename}
-                      ><X size={13} /></button>
-                    </form>
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        className="session-row"
-                        data-virtual-index={index}
-                        data-session-focus-id={session.sessionId}
-                        data-session-focus-target="row"
-                        aria-label={t("openSessionLabel").replace("{title}", session.title)}
-                        aria-current={active ? "page" : undefined}
-                        disabled={engineStatus === "starting" || engineStatus === "running"}
-                        onDoubleClick={() => openSession(session)}
-                        onContextMenu={(event) => {
-                          event.preventDefault();
-                          startSessionRename(session, "row");
-                        }}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.preventDefault();
-                            openSession(session);
-                          }
-                        }}
-                      >
-                        <span className="session-active-marker" aria-hidden="true" />
-                        <span className="session-copy">
-                          <span className="session-title">{session.title}</span>
-                          <span className="session-meta">
-                            {workspaceName(session.workspacePath)} · {t("messageCount").replace(
-                              "{count}", String(session.messageCount))}
-                          </span>
-                          <span className="session-detail">
-                            {(session.worktreeLabel || session.branch) && (
-                              <span>{session.worktreeLabel || session.branch}</span>
-                            )}
-                            <time dateTime={session.updatedAt}>
-                              {formatSessionTime(session.updatedAt, language)}
-                            </time>
-                          </span>
+                      <span className="session-copy">
+                        <span className="session-title">
+                          <span className="session-title-text">{session.title}</span>
+                          {runningSessionIds.has(session.sessionId) && (
+                            <span className="session-running-badge" title={t("sessionRunning")}>
+                              {t("sessionRunningShort")}
+                            </span>
+                          )}
                         </span>
-                      </button>
+                        <span className="session-meta">
+                          {workspaceName(session.workspacePath)} · {t("messageCount").replace(
+                            "{count}", String(session.messageCount))}
+                        </span>
+                        <span className="session-detail">
+                          {(session.worktreeLabel || session.branch) && (
+                            <span>{session.worktreeLabel || session.branch}</span>
+                          )}
+                          <time dateTime={session.updatedAt}>
+                            {formatSessionTime(session.updatedAt, language)}
+                          </time>
+                        </span>
+                      </span>
+                    </button>
+                    {!active && (
                       <button
                         type="button"
-                        className="session-fork-button"
-                        aria-label={t("forkSessionLabel").replace("{title}", session.title)}
-                        title={t("forkSession")}
-                        disabled={forking || engineStatus === "starting" || engineStatus === "running"}
-                        onClick={() => forkSession(session)}
+                        className="session-open-button"
+                        aria-label={t("switchToSession") + "：" + session.title}
+                        title={t("switchToSession")}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          openSession(session);
+                        }}
                       >
-                        {forking
-                          ? <LoaderCircle className="session-spinner" size={12} />
-                          : <GitFork size={12} />}
+                        <Eye size={12} />
                       </button>
-                      <button
-                        type="button"
-                        className="session-rename-button"
-                        data-session-focus-id={session.sessionId}
-                        data-session-focus-target="rename"
-                        aria-label={t("renameSessionLabel").replace("{title}", session.title)}
-                        title={t("renameSession")}
-                        onClick={() => startSessionRename(session, "rename")}
-                      ><Pencil size={12} /></button>
-                      <button
-                        type="button"
-                        className="session-archive-button"
-                        aria-label={t(archivedSessionsView
-                          ? "restoreSessionLabel"
-                          : "archiveSessionLabel").replace("{title}", session.title)}
-                        title={t(archivedSessionsView ? "restoreSession" : "archiveSession")}
-                        disabled={archiving}
-                        onClick={() => archiveSession(session)}
-                      >
-                        {archiving
-                          ? <LoaderCircle className="session-spinner" size={12} />
-                          : archivedSessionsView
-                            ? <ArchiveRestore size={12} />
-                            : <Archive size={12} />}
-                      </button>
-                    </>
-                  )}
-                    </div>
-                  );
-                }}
-                footer={loadMoreSessionsButton}
-              />
-            )}
-          </div>
+                    )}
+                    <button
+                      type="button"
+                      className="session-fork-button"
+                      aria-label={t("forkSessionLabel").replace("{title}", session.title)}
+                      title={t("forkSession")}
+                      disabled={forking}
+                      onClick={() => forkSession(session)}
+                    >
+                      {forking
+                        ? <LoaderCircle className="session-spinner" size={12} />
+                        : <GitFork size={12} />}
+                    </button>
+                    <button
+                      type="button"
+                      className="session-rename-button"
+                      data-session-focus-id={session.sessionId}
+                      data-session-focus-target="rename"
+                      aria-label={t("renameSessionLabel").replace("{title}", session.title)}
+                      title={t("renameSession")}
+                      onClick={() => startSessionRename(session, "rename")}
+                    ><Pencil size={12} /></button>
+                    <button
+                      type="button"
+                      className="session-archive-button"
+                      aria-label={t(archivedSessionsView
+                        ? "restoreSessionLabel"
+                        : "archiveSessionLabel").replace("{title}", session.title)}
+                      title={t(archivedSessionsView ? "restoreSession" : "archiveSession")}
+                      disabled={archiving}
+                      onClick={() => archiveSession(session)}
+                    >
+                      {archiving
+                        ? <LoaderCircle className="session-spinner" size={12} />
+                        : archivedSessionsView
+                          ? <ArchiveRestore size={12} />
+                          : <Archive size={12} />}
+                    </button>
+                  </>
+                )}
+                  </div>
+                );
+              }}
+              footer={loadMoreSessionsButton}
+            />
+          )}
         </div>
       </nav>
 
@@ -4006,6 +4728,50 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
                   >{rewindSubmitting ? t("rewinding") : t("rewindToPoint")}</button>
                 )}
               </div>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {sessionHandoffOpen && pendingSessionHandoff && (
+        <div className="modal-backdrop" role="presentation">
+          <section
+            className="native-risk-dialog"
+            role="alertdialog"
+            tabIndex={-1}
+            aria-modal="true"
+            aria-labelledby="session-handoff-title"
+            aria-describedby="session-handoff-description"
+          >
+            <header className="dialog-header native-risk-header">
+              <div>
+                <ShieldAlert size={18} aria-hidden="true" />
+                <h2 id="session-handoff-title">{t("interruptRunningTitle")}</h2>
+              </div>
+            </header>
+            <p id="session-handoff-description" className="native-risk-copy">
+              {t("interruptRunningBody")}
+            </p>
+            {pendingSessionHandoff.kind === "open" && (
+              <p className="native-risk-copy muted">
+                {t("switchToSession")}: {pendingSessionHandoff.session.title}
+              </p>
+            )}
+            <div className="dialog-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={cancelSessionHandoff}
+              >{t("stayOnSession")}</button>
+              <button
+                type="button"
+                className="risk-confirm-button"
+                onClick={confirmSessionHandoff}
+              >
+                {pendingSessionHandoff.kind === "new"
+                  ? t("interruptAndNewSession")
+                  : t("interruptAndSwitch")}
+              </button>
             </div>
           </section>
         </div>

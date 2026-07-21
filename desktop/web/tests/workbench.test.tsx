@@ -2323,6 +2323,51 @@ describe("Workbench", () => {
     expect(screen.getByText("terminal-fix")).toBeInTheDocument();
   });
 
+  it("stacks recent workspaces above sessions and exposes a resizable sidebar", () => {
+    const bridge = new RecordingBridge();
+    render(<Workbench bridge={bridge} />);
+    act(() => bridge.emit({
+      type: "workspace/recent/changed",
+      paths: ["C:\\Users\\rksha\\Documents\\sub2"]
+    }));
+    act(() => bridge.emit(sessionListChanged([
+      sessionSummary({
+        sessionId: "session-layout",
+        title: "布局修复会话",
+        workspacePath: "C:\\Users\\rksha\\Documents\\sub2",
+        messageCount: 2
+      })
+    ])));
+
+    const section = document.querySelector<HTMLElement>("#session-results.session-section");
+    expect(section).not.toBeNull();
+    // Recent workspaces sit above the session heading/list (never side-by-side).
+    const recent = section!.querySelector(":scope > .recent-workspaces");
+    const heading = section!.querySelector(":scope > .section-heading");
+    const sessions = section!.querySelector(":scope > .session-list");
+    expect(recent).not.toBeNull();
+    expect(heading).not.toBeNull();
+    expect(sessions).not.toBeNull();
+    expect(section!.firstElementChild).toBe(recent);
+    expect(
+      recent!.compareDocumentPosition(heading!) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(
+      heading!.compareDocumentPosition(sessions!) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(screen.getByText("sub2")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开会话：布局修复会话" })).toBeInTheDocument();
+
+    const appShell = document.querySelector<HTMLElement>(".app-shell");
+    expect(appShell?.style.getPropertyValue("--task-sidebar-width")).toBe("300px");
+
+    const splitter = screen.getByRole("button", { name: "调整侧栏宽度" });
+    fireEvent.keyDown(splitter, { key: "ArrowRight" });
+    expect(appShell?.style.getPropertyValue("--task-sidebar-width")).toBe("316px");
+    fireEvent.doubleClick(splitter);
+    expect(appShell?.style.getPropertyValue("--task-sidebar-width")).toBe("300px");
+  });
+
   it("virtualizes 10,000 sessions without losing distant keyboard selection or list semantics", () => {
     const bridge = new RecordingBridge();
     render(<Workbench bridge={bridge} />);
@@ -2498,7 +2543,8 @@ describe("Workbench", () => {
     fireEvent.click(screen.getByRole("button", { name: "WSL2 严格模式" }));
     const row = screen.getByRole("button", { name: "打开会话：检查登录流程" });
 
-    fireEvent.doubleClick(row);
+    fireEvent.click(row);
+    // Already focused — Enter must not re-open the same session.
     fireEvent.keyDown(row, { key: "Enter" });
 
     expect(bridge.commands.filter((command) => command.type === "session/open")).toEqual([
@@ -2507,14 +2553,111 @@ describe("Workbench", () => {
         sessionId: "session-42",
         workspacePath: "D:\\work\\login",
         executionProfile: "WslStrict"
-      },
-      {
-        type: "session/open",
-        sessionId: "session-42",
-        workspacePath: "D:\\work\\login",
-        executionProfile: "WslStrict"
       }
     ]);
+  });
+
+  it("allows starting a new session while a turn is running and restores cached transcript", () => {
+    const bridge = new RecordingBridge();
+    render(<Workbench bridge={bridge} />);
+    act(() => {
+      bridge.emit({
+        type: "workspace/selected",
+        path: "C:\\workspace",
+        workspaceGeneration: 1
+      });
+      bridge.emit(sessionListChanged([
+        sessionSummary({ sessionId: "session-running", title: "运行中的会话" }),
+        sessionSummary({ sessionId: "session-idle", title: "空闲会话" })
+      ]));
+      bridge.emit({
+        type: "session/active/changed",
+        sessionId: "session-running",
+        workspacePath: "C:\\workspace",
+        engineEpoch: 1
+      });
+      bridge.emit({ type: "engine/status", status: "ready", sessionId: "session-running", engineEpoch: 1 });
+    });
+
+    const composer = screen.getByPlaceholderText("向 AgentDesk 描述任务");
+    fireEvent.change(composer, { target: { value: "先做这个任务" } });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    // Acknowledge native non-sandbox execution risk (same as production first prompt).
+    fireEvent.click(screen.getByRole("button", { name: "继续本机执行" }));
+    act(() => {
+      bridge.emit({
+        type: "engine/status",
+        status: "running",
+        sessionId: "session-running",
+        engineEpoch: 2
+      });
+      bridge.emit({
+        type: "session/update",
+        sessionId: "session-running",
+        engineEpoch: 2,
+        updateKind: "agent_message_chunk",
+        text: "后台回复片段"
+      });
+    });
+
+    expect(screen.getByText("先做这个任务")).toBeInTheDocument();
+    expect(screen.getByText("后台回复片段")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建会话" })).toBeEnabled();
+    expect(screen.getByText("运行中")).toBeInTheDocument();
+
+    // Switch to another session while the first turn is still "running".
+    fireEvent.click(screen.getByRole("button", { name: "打开会话：空闲会话", hidden: false }));
+    // Confirm interrupt dialog (single-engine supersede).
+    fireEvent.click(screen.getByRole("button", { name: "中断并切换" }));
+    expect(bridge.commands).toContainEqual({
+      type: "session/open",
+      sessionId: "session-idle",
+      workspacePath: "C:\\workspace",
+      executionProfile: "NativeProtected"
+    });
+    // Late busy status for the superseded session must not lock the new composer.
+    act(() => {
+      bridge.emit({
+        type: "engine/status",
+        status: "running",
+        message: "已有任务正在运行。",
+        sessionId: "session-running",
+        engineEpoch: 3
+      });
+    });
+    act(() => {
+      bridge.emit({
+        type: "session/active/changed",
+        sessionId: "session-idle",
+        workspacePath: "C:\\workspace",
+        engineEpoch: 4
+      });
+      bridge.emit({ type: "engine/status", status: "ready", sessionId: "session-idle", engineEpoch: 4 });
+    });
+
+    expect(screen.queryByText("先做这个任务")).not.toBeInTheDocument();
+    expect(screen.queryByText("后台回复片段")).not.toBeInTheDocument();
+    const idleComposer = screen.getByPlaceholderText("向 AgentDesk 描述任务");
+    expect(idleComposer).not.toBeDisabled();
+    fireEvent.change(idleComposer, { target: { value: "你好" } });
+    fireEvent.keyDown(idleComposer, { key: "Enter" });
+    expect(bridge.commands.filter((c) => c.type === "engine/prompt").length).toBeGreaterThanOrEqual(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "打开会话：运行中的会话" }));
+    act(() => {
+      bridge.emit({
+        type: "session/active/changed",
+        sessionId: "session-running",
+        workspacePath: "C:\\workspace",
+        engineEpoch: 5
+      });
+      bridge.emit({ type: "engine/status", status: "ready", sessionId: "session-running", engineEpoch: 5 });
+    });
+
+    expect(screen.getByText("先做这个任务")).toBeInTheDocument();
+    expect(screen.getByText("后台回复片段")).toBeInTheDocument();
+    // After switch-back the host marks ready — composer must accept input.
+    expect(screen.getByPlaceholderText("向 AgentDesk 描述任务")).not.toBeDisabled();
   });
 
   it("forks a listed session and opens the authoritative fork after refreshing", () => {
@@ -3208,6 +3351,55 @@ describe("Workbench", () => {
     expect(screen.getByRole("checkbox")).toBeChecked();
     expect(document.querySelector(".markdown-body script")).not.toBeInTheDocument();
     expect(screen.queryByText(/agentDeskInjected/)).not.toBeInTheDocument();
+  });
+
+  it("does not re-render engine user_message_chunk echoes as assistant bubbles", () => {
+    const bridge = new RecordingBridge();
+    render(<Workbench bridge={bridge} />);
+
+    fireEvent.change(screen.getByRole("textbox", { name: zhCn.promptPlaceholder }), {
+      target: { value: "hello" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: zhCn.send }));
+    // Native risk may gate first send; confirm if present.
+    const riskContinue = screen.queryByRole("button", { name: zhCn.nativeRiskContinue });
+    if (riskContinue) {
+      fireEvent.click(riskContinue);
+    }
+
+    expect(document.querySelectorAll(".message.user-message")).toHaveLength(1);
+    expect(document.querySelector(".message.user-message")).toHaveTextContent("hello");
+
+    act(() => {
+      bridge.emit({
+        type: "session/update",
+        sessionId: "session-42",
+        updateKind: "user_message_chunk",
+        engineEpoch: 0,
+        text: "hello"
+      } as HostEvent);
+      bridge.emit({
+        type: "session/update",
+        sessionId: "session-42",
+        updateKind: "agent_message_chunk",
+        engineEpoch: 0,
+        text: "agent reply"
+      } as HostEvent);
+    });
+
+    expect(document.querySelectorAll(".message.user-message")).toHaveLength(1);
+    expect(document.querySelectorAll(".message.assistant-message")).toHaveLength(1);
+    expect(document.querySelector(".message.assistant-message")).toHaveTextContent("agent reply");
+    // Echoed user chunk must not create a second user bubble or an assistant bubble with the prompt.
+    const userBubbles = Array.from(document.querySelectorAll(".message.user-message"));
+    const assistantBubbles = Array.from(document.querySelectorAll(".message.assistant-message"));
+    expect(userBubbles.map((node) => node.textContent)).toEqual(
+      expect.arrayContaining([expect.stringContaining("hello")])
+    );
+    expect(assistantBubbles.some((node) =>
+      (node.textContent ?? "").includes("hello") &&
+      !(node.textContent ?? "").includes("agent reply")
+    )).toBe(false);
   });
 
   it("ignores a session update from an older engine epoch", () => {

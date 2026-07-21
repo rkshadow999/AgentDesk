@@ -209,7 +209,7 @@ public static class UpdaterCommandLine
                 throw new UpdaterCommandLineException("The updater URI is invalid.");
             }
 
-            UpdateOriginPolicy.GitHub.EnsureAllowedInitialUri(uri);
+            UpdateOriginPolicy.Default.EnsureAllowedInitialUri(uri);
             return uri;
         }
         catch (UpdateSecurityException exception)
