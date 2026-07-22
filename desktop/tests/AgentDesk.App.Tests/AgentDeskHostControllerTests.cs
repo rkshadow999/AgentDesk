@@ -2145,6 +2145,168 @@ public sealed class AgentDeskHostControllerTests
     }
 
     [Fact]
+    public async Task SessionOpen_WhilePromptInFlight_DoesNotCancelBackgroundTurn()
+    {
+        // True multi-session: focus switch must keep the prior session's PromptAsync alive.
+        var fixture = new ControllerFixture();
+        fixture.Credentials.Save("xai", "xai-test-key");
+        var engine = fixture.Factory.EnqueueEngine("C:\\workspace", "session-a");
+        var promptStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePrompt = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        engine.PromptHandler = async (sessionId, _, token) =>
+        {
+            Assert.Equal("session-a", sessionId.Value);
+            promptStarted.TrySetResult();
+            await releasePrompt.Task.WaitAsync(token);
+            return new PromptResult(EngineStopReason.EndTurn, "end_turn");
+        };
+        await using var controller = fixture.CreateController();
+
+        var promptTask = controller.HandleAsync(
+            new PromptWebCommand("background turn", ExecutionProfile.NativeProtected));
+        await promptStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await controller.HandleAsync(
+            new SessionOpenWebCommand(
+                "session-b",
+                "C:\\workspace",
+                ExecutionProfile.NativeProtected));
+
+        Assert.Empty(engine.CancelledSessions);
+        Assert.Contains("load-session:session-b:C:\\workspace", engine.Calls);
+        Assert.DoesNotContain(
+            fixture.Events.Snapshot(),
+            item => item is PromptCompletedWebEvent { SessionId: "session-a" });
+
+        releasePrompt.TrySetResult();
+        await promptTask.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Contains(
+            fixture.Events.Snapshot(),
+            item => item is PromptCompletedWebEvent
+            {
+                SessionId: "session-a",
+                StopReason: "end_turn",
+            });
+        Assert.Empty(engine.CancelledSessions);
+    }
+
+    [Fact]
+    public async Task ConcurrentPrompts_OnDifferentSessions_AreBothAccepted()
+    {
+        var fixture = new ControllerFixture();
+        fixture.Credentials.Save("xai", "xai-test-key");
+        var engine = fixture.Factory.EnqueueEngine("C:\\workspace", "session-a");
+        var aStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseAll = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        engine.PromptHandler = async (sessionId, text, token) =>
+        {
+            if (sessionId.Value == "session-a")
+            {
+                aStarted.TrySetResult();
+            }
+            else if (sessionId.Value == "session-b")
+            {
+                bStarted.TrySetResult();
+            }
+            await releaseAll.Task.WaitAsync(token);
+            return new PromptResult(EngineStopReason.EndTurn, "end_turn");
+        };
+        await using var controller = fixture.CreateController();
+
+        var promptA = controller.HandleAsync(
+            new PromptWebCommand("task-a", ExecutionProfile.NativeProtected));
+        await aStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await controller.HandleAsync(
+            new SessionOpenWebCommand(
+                "session-b",
+                "C:\\workspace",
+                ExecutionProfile.NativeProtected));
+        var promptB = controller.HandleAsync(
+            new PromptWebCommand("task-b", ExecutionProfile.NativeProtected));
+        await bStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Contains("prompt:session-a", engine.Calls);
+        Assert.Contains("prompt:session-b", engine.Calls);
+        Assert.Empty(engine.CancelledSessions);
+
+        releaseAll.TrySetResult();
+        await Task.WhenAll(promptA, promptB).WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Contains("task-a", engine.PromptTexts);
+        Assert.Contains("task-b", engine.PromptTexts);
+        Assert.Contains(
+            fixture.Events.Snapshot(),
+            item => item is PromptCompletedWebEvent { SessionId: "session-a" });
+        Assert.Contains(
+            fixture.Events.Snapshot(),
+            item => item is PromptCompletedWebEvent { SessionId: "session-b" });
+    }
+
+    [Fact]
+    public async Task Cancel_TargetsOnlyTheNamedSessionPrompt()
+    {
+        var fixture = new ControllerFixture();
+        fixture.Credentials.Save("xai", "xai-test-key");
+        var engine = fixture.Factory.EnqueueEngine("C:\\workspace", "session-a");
+        var aStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var aCancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseB = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        engine.PromptHandler = async (sessionId, _, token) =>
+        {
+            if (sessionId.Value == "session-a")
+            {
+                aStarted.TrySetResult();
+                try
+                {
+                    await Task.Delay(Timeout.Infinite, token);
+                }
+                catch (OperationCanceledException)
+                {
+                    aCancelled.TrySetResult();
+                    throw;
+                }
+            }
+
+            bStarted.TrySetResult();
+            await releaseB.Task.WaitAsync(token);
+            return new PromptResult(EngineStopReason.EndTurn, "end_turn");
+        };
+        await using var controller = fixture.CreateController();
+
+        var promptA = controller.HandleAsync(
+            new PromptWebCommand("task-a", ExecutionProfile.NativeProtected));
+        await aStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await controller.HandleAsync(
+            new SessionOpenWebCommand(
+                "session-b",
+                "C:\\workspace",
+                ExecutionProfile.NativeProtected));
+        var promptB = controller.HandleAsync(
+            new PromptWebCommand("task-b", ExecutionProfile.NativeProtected));
+        await bStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await controller.HandleAsync(new CancelWebCommand("session-a"));
+        await aCancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await promptA.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Contains("session-a", engine.CancelledSessions);
+        Assert.DoesNotContain("session-b", engine.CancelledSessions);
+
+        releaseB.TrySetResult();
+        await promptB.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Contains(
+            fixture.Events.Snapshot(),
+            item => item is PromptCompletedWebEvent { SessionId: "session-b" });
+    }
+
+    [Fact]
     public async Task PromptFailure_NotificationFailureDoesNotChangeTheGenericErrorProjection()
     {
         var fixture = new ControllerFixture();

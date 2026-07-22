@@ -2805,7 +2805,31 @@ public sealed partial class AgentDeskHostController :
         SessionOpenWebCommand command,
         CancellationToken cancellationToken)
     {
-        if (!await UpdateWorkspaceAsync(command.WorkspacePath, cancellationToken)
+        // True multi-session: opening another session in the *same* workspace is a
+        // focus switch. UpdateWorkspaceAsync rejects any in-flight prompt (to protect
+        // workspace teardown), so same-path opens must not go through that gate.
+        // Only a real workspace change still requires UpdateWorkspaceAsync.
+        var needsWorkspaceUpdate = true;
+        await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            if (_workspacePath is not null &&
+                string.Equals(
+                    _workspacePath,
+                    command.WorkspacePath,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                needsWorkspaceUpdate = false;
+            }
+        }
+        finally
+        {
+            _stateGate.Release();
+        }
+
+        if (needsWorkspaceUpdate &&
+            !await UpdateWorkspaceAsync(command.WorkspacePath, cancellationToken)
                 .ConfigureAwait(false))
         {
             return;
