@@ -1,8 +1,8 @@
 # AgentDesk — 给开源用户与贡献者的说明
 
 > 仓库：[github.com/rkshadow999/AgentDesk](https://github.com/rkshadow999/AgentDesk)  
-> 当前公开预览版本：**0.1.0-alpha.13**（Windows 11 x64）  
-> 更新时间：2026-07-21
+> 当前公开预览版本：**0.1.0-alpha.14**（Windows 11 x64）  
+> 更新时间：2026-07-23
 
 本文面向两类读者：
 
@@ -21,7 +21,7 @@ AgentDesk 目前提供 **社区自托管的 Windows 预览包**（Inno Setup 安
 | 方式 | 链接 |
 | --- | --- |
 | **下载页（推荐先打开这里）** | https://update.rkshadow.com/install/ |
-| **Windows Setup.exe**（无需管理员，默认装到 `%LOCALAPPDATA%\AgentDesk`） | https://update.rkshadow.com/install/AgentDesk-0.1.0-alpha.13-win-x64-Setup.exe |
+| **Windows Setup.exe**（无需管理员，默认装到 `%LOCALAPPDATA%\AgentDesk`） | https://update.rkshadow.com/install/AgentDesk-0.1.0-alpha.14-win-x64-Setup.exe |
 | **Portable zip**（解压即用） | https://update.rkshadow.com/install/AgentDesk-latest-win-x64-portable.zip |
 | **自动更新 Feed**（客户端内置） | https://update.rkshadow.com/feed/ |
 
@@ -60,7 +60,7 @@ SHA-256(c9b3ccf2dd92519a17720056dc43c1f3bb55f4652a1d99e68f99160657611e37)
 
 | 你手里的包 | 建议 |
 | --- | --- |
-| 含自托管公钥的 alpha.6 selfhost / alpha.7–alpha.12 | 设置中检查更新 → 升到 **alpha.13** |
+| 含自托管公钥的 alpha.6 selfhost / alpha.7–alpha.13 | 设置中检查更新 → 升到 **alpha.14** |
 | 更早的 `alpha.6-fixed` 等**不含新公钥**的包 | **无法校验** `update.rkshadow.com` 清单 → 请重新下载上面的 Setup / Portable |
 
 ### 版本号约定（开源用户 / 维护者）
@@ -72,14 +72,14 @@ SHA-256(c9b3ccf2dd92519a17720056dc43c1f3bb55f4652a1d99e68f99160657611e37)
 
 ---
 
-## 2. 当前 alpha.13 已交付的能力（用户可感知）
+## 2. 当前 alpha.14 已交付的能力（用户可感知）
 
 | 能力 | 说明 |
 | --- | --- |
 | 中文优先桌面 UI + 英文切换 | Web 文案即时切换；部分原生字符串可能需重启 |
 | **应用图标（RK 品牌）** | exe / 开始菜单 / Setup 向导 / 桌面快捷方式使用统一 `.ico` 与磁贴 PNG |
 | **会话完成桌面通知** | 任务完成/失败时 Windows 通知；**多会话各弹一条**；点击可回到对应会话 |
-| **真正多会话并行** | 同一引擎进程内多会话可同时 running；**切换会话默认不中断** 其它 turn；侧栏可显示多个运行中 |
+| **真正多会话并行（alpha.14 稳定）** | 同一引擎进程内多会话可同时 running；**切换会话默认不中断** 其它 turn；侧栏可显示多个运行中；**同工作区 session/open 不再被 in-flight prompt 误拒** |
 | **`/` 模式命令** | `/plan` `/execute` `/agent` 立即切换会话模式；`/goal` 与引擎 skills 一并出现在命令面板 |
 | **Composer 模型选择** | 聊天框右下角模型 chip（Codex 风格）；可选 curated 列表或自定义 ID，走 `provider/save` |
 | **图片附件** | 回形针在引擎能力未上报前可用；**粘贴 / 拖入** PNG/JPEG/GIF/WebP 经宿主 `attachment/stage` 暂存 |
@@ -100,7 +100,7 @@ SHA-256(c9b3ccf2dd92519a17720056dc43c1f3bb55f4652a1d99e68f99160657611e37)
 
 ### 请诚实理解的边界（开源预览）
 
-1. **单引擎进程内多会话并行（alpha.13+）**  
+1. **单引擎进程内多会话并行（alpha.13+，alpha.14 修复焦点切换）**  
    同一 sidecar 进程可同时跑多个会话的 turn；切换会话 **默认不中断** 其它会话。  
    仍共享工作区/凭据/API 限流；**不是** 多进程 worker 池。同工作区并行改文件仍可能冲突。
 
@@ -149,7 +149,7 @@ cargo build --locked -p xai-grok-pager-bin --profile release-dist --features rel
 - [docs/INSTALLATION.md](docs/INSTALLATION.md)
 - [docs/BUILD-AND-TEST.md](docs/BUILD-AND-TEST.md) / [docs/BUILD-AND-TEST.zh-CN.md](docs/BUILD-AND-TEST.zh-CN.md)
 
-Web 工作台单测（本轮验证）：**270 passed**。
+Web 工作台单测（本轮验证）：**274 passed**。
 
 ---
 
@@ -176,8 +176,8 @@ $env:DOTNET_ROOT = "$env:USERPROFILE\.dotnet"
 $env:PATH = "$env:USERPROFILE\.dotnet;C:\Program Files\PowerShell\7;" + $env:PATH
 
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\agentdesk\Publish-AgentDeskSelfHostedUpdate.ps1 `
-  -Version "0.1.0-alpha.13" `
-  -ReleaseDirectory ".\artifacts\release-alpha.13-selfhost\AgentDesk-0.1.0-alpha.13-win-x64"
+  -Version "0.1.0-alpha.14" `
+  -ReleaseDirectory ".\artifacts\release-alpha.14-selfhost\AgentDesk-0.1.0-alpha.14-win-x64"
 ```
 
 发布产物目录（本机，已 gitignore）：`artifacts/release-alpha.*`、`artifacts/selfhosted-feed/`。
@@ -186,8 +186,8 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\agentdesk\Publish-AgentD
 
 ## 5. 本仓库近期功能变更摘要（便于 Code Review）
 
-- **桌面宿主**：最近工作区持久化、会话 open/new 与 supersede 协作、自托管更新默认 feed 与公钥 pin。
-- **Workbench（React）**：会话线程缓存、运行中切换确认、侧栏拖拽宽度、首轮发送/流式在 session 绑定前可绘制、`prompt/completed` 正确解锁输入。
+- **桌面宿主**：真正多会话 `PromptSlot`；同工作区 `session/open` 跳过 `UpdateWorkspaceAsync` 门控（alpha.14）；自托管更新默认 feed 与公钥 pin。
+- **Workbench（React）**：会话线程缓存、无 handoff 焦点切换、侧栏拖拽宽度、首轮发送/流式在 session 绑定前可绘制、`prompt/completed` 正确解锁输入。
 - **Inspector**：会话绑定与活动标签显示修复。
 - **品牌图标**：`desktop/src/AgentDesk.App/Assets/AgentDesk-icon-source.png` → 运行 `Generate-AppAssets.ps1` 生成 `AgentDesk.ico` 与各尺寸磁贴 PNG；`ApplicationIcon` 与 Inno `SetupIconFile` 已接入。
 - **打包**：Inno Setup 安装包 + 签名 Portable 更新通道。
