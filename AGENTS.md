@@ -1,7 +1,7 @@
 # AgentDesk — 给开源用户与贡献者的说明
 
 > 仓库：[github.com/rkshadow999/AgentDesk](https://github.com/rkshadow999/AgentDesk)  
-> 当前公开预览版本：**0.1.0-alpha.11**（Windows 11 x64）  
+> 当前公开预览版本：**0.1.0-alpha.12**（Windows 11 x64）  
 > 更新时间：2026-07-21
 
 本文面向两类读者：
@@ -21,7 +21,7 @@ AgentDesk 目前提供 **社区自托管的 Windows 预览包**（Inno Setup 安
 | 方式 | 链接 |
 | --- | --- |
 | **下载页（推荐先打开这里）** | https://update.rkshadow.com/install/ |
-| **Windows Setup.exe**（无需管理员，默认装到 `%LOCALAPPDATA%\AgentDesk`） | https://update.rkshadow.com/install/AgentDesk-0.1.0-alpha.11-win-x64-Setup.exe |
+| **Windows Setup.exe**（无需管理员，默认装到 `%LOCALAPPDATA%\AgentDesk`） | https://update.rkshadow.com/install/AgentDesk-0.1.0-alpha.12-win-x64-Setup.exe |
 | **Portable zip**（解压即用） | https://update.rkshadow.com/install/AgentDesk-latest-win-x64-portable.zip |
 | **自动更新 Feed**（客户端内置） | https://update.rkshadow.com/feed/ |
 
@@ -60,7 +60,7 @@ SHA-256(c9b3ccf2dd92519a17720056dc43c1f3bb55f4652a1d99e68f99160657611e37)
 
 | 你手里的包 | 建议 |
 | --- | --- |
-| 含自托管公钥的 alpha.6 selfhost / alpha.7–alpha.10 | 设置中检查更新 → 升到 **alpha.11** |
+| 含自托管公钥的 alpha.6 selfhost / alpha.7–alpha.11 | 设置中检查更新 → 升到 **alpha.12** |
 | 更早的 `alpha.6-fixed` 等**不含新公钥**的包 | **无法校验** `update.rkshadow.com` 清单 → 请重新下载上面的 Setup / Portable |
 
 ### 版本号约定（开源用户 / 维护者）
@@ -72,13 +72,16 @@ SHA-256(c9b3ccf2dd92519a17720056dc43c1f3bb55f4652a1d99e68f99160657611e37)
 
 ---
 
-## 2. 当前 alpha.11 已交付的能力（用户可感知）
+## 2. 当前 alpha.12 已交付的能力（用户可感知）
 
 | 能力 | 说明 |
 | --- | --- |
 | 中文优先桌面 UI + 英文切换 | Web 文案即时切换；部分原生字符串可能需重启 |
 | **应用图标（RK 品牌）** | exe / 开始菜单 / Setup 向导 / 桌面快捷方式使用统一 `.ico` 与磁贴 PNG |
-| **会话完成桌面通知** | 任务完成/失败时 Windows 通知；**多会话各弹一条**（按 sessionId 分 Tag）；点击可回到对应会话 |
+| **会话完成桌面通知** | 任务完成/失败时 Windows 通知；**多会话各弹一条**；点击可回到对应会话 |
+| **`/` 模式命令** | `/plan` `/execute` `/agent` 立即切换会话模式；`/goal` 与引擎 skills 一并出现在命令面板 |
+| **Composer 模型选择** | 聊天框右下角模型 chip（Codex 风格）；可选 curated 列表或自定义 ID，走 `provider/save` |
+| **图片附件** | 回形针在引擎能力未上报前可用；**粘贴 / 拖入** PNG/JPEG/GIF/WebP 经宿主 `attachment/stage` 暂存 |
 | 工作区选择 / 最近工作区 | 本地持久化最近路径，侧栏可切换、添加、移除 |
 | 会话中心 | 新建会话、打开会话、重命名、归档等（以 UI 实际暴露为准） |
 | **多会话切换 UX** | 运行中切换会弹出确认（中断当前 turn 后切换）；侧栏有明确「打开」操作 |
@@ -172,8 +175,8 @@ $env:DOTNET_ROOT = "$env:USERPROFILE\.dotnet"
 $env:PATH = "$env:USERPROFILE\.dotnet;C:\Program Files\PowerShell\7;" + $env:PATH
 
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\agentdesk\Publish-AgentDeskSelfHostedUpdate.ps1 `
-  -Version "0.1.0-alpha.11" `
-  -ReleaseDirectory ".\artifacts\release-alpha.11-selfhost\AgentDesk-0.1.0-alpha.11-win-x64"
+  -Version "0.1.0-alpha.12" `
+  -ReleaseDirectory ".\artifacts\release-alpha.12-selfhost\AgentDesk-0.1.0-alpha.12-win-x64"
 ```
 
 发布产物目录（本机，已 gitignore）：`artifacts/release-alpha.*`、`artifacts/selfhosted-feed/`。

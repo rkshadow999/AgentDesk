@@ -164,6 +164,35 @@ public sealed class WebCommandDispatcher
             return;
         }
 
+        if (command is StageImageAttachmentsWebCommand stageImages)
+        {
+            var store = RequiredImageAttachmentStore();
+            if (!await _imageAttachmentOperationGate
+                    .WaitAsync(0, cancellationToken)
+                    .ConfigureAwait(false))
+            {
+                throw new InvalidDataException(
+                    "Another native image attachment operation is already active.");
+            }
+            try
+            {
+                var result = await store
+                    .StagePayloadsAsync(stageImages.Payloads, cancellationToken)
+                    .ConfigureAwait(false);
+                await _publishWebEvent(new ImageAttachmentsChangedWebEvent(
+                        stageImages.RequestId,
+                        result.Attachments,
+                        Cancelled: false,
+                        result.Error))
+                    .ConfigureAwait(false);
+            }
+            finally
+            {
+                _imageAttachmentOperationGate.Release();
+            }
+            return;
+        }
+
         if (command is DiscardImageAttachmentsWebCommand discardImages)
         {
             await _imageAttachmentOperationGate.WaitAsync(cancellationToken).ConfigureAwait(false);

@@ -589,6 +589,11 @@ export type HostCommand =
       replaceCredential: boolean;
     }
   | { type: "attachment/select"; requestId: string }
+  | {
+      type: "attachment/stage";
+      requestId: string;
+      payloads: Array<{ name: string; mimeType: string; base64Data: string }>;
+    }
   | { type: "attachment/discard"; tokens: string[] }
   | {
       type: "engine/prompt";

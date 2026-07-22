@@ -138,50 +138,16 @@ public sealed class NativeImageAttachmentStore : IAsyncDisposable
                     return ResultUnsafe(ImageAttachmentError.ReadFailed);
                 }
 
-                try
+                var stageError = await StageBytesUnsafeAsync(
+                        name,
+                        mimeType,
+                        bytes,
+                        addedTokens,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (stageError is not null)
                 {
-                    if (!await IsValidImageAsync(mimeType, bytes, cancellationToken)
-                            .ConfigureAwait(false))
-                    {
-                        return ResultUnsafe(ImageAttachmentError.ContentMismatch);
-                    }
-
-                    var token = NewToken();
-                    var stagedPath = Path.Combine(_stagingDirectory, token + ".image");
-                    var committed = false;
-                    try
-                    {
-                        await WriteNewFileAsync(stagedPath, bytes, cancellationToken)
-                            .ConfigureAwait(false);
-                        var reference = new NativeImageAttachmentReference(
-                            token,
-                            name,
-                            mimeType,
-                            bytes.LongLength);
-                        _attachments.Add(
-                            token,
-                            new StagedAttachment(
-                                reference,
-                                stagedPath,
-                                SHA256.HashData(bytes)));
-                        addedTokens.Add(token);
-                        committed = true;
-                    }
-                    catch (Exception exception) when (IsFileReadFailure(exception))
-                    {
-                        return ResultUnsafe(ImageAttachmentError.ReadFailed);
-                    }
-                    finally
-                    {
-                        if (!committed)
-                        {
-                            DeleteOrQueueUnsafe(stagedPath);
-                        }
-                    }
-                }
-                finally
-                {
-                    CryptographicOperations.ZeroMemory(bytes);
+                    return ResultUnsafe(stageError);
                 }
             }
 
@@ -189,20 +155,174 @@ public sealed class NativeImageAttachmentStore : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
-            foreach (var token in addedTokens)
-            {
-                if (_attachments.Remove(token, out var staged))
-                {
-                    DeleteStagedAttachment(staged);
-                }
-            }
-            RetryPendingDeletionsUnsafe();
+            RollbackAddedTokensUnsafe(addedTokens);
             throw;
         }
         finally
         {
             _gate.Release();
         }
+    }
+
+    /// <summary>
+    /// Stage images that arrived as in-memory payloads (clipboard paste / drag-drop).
+    /// Base64 is decoded only on the native host so WebView never keeps raw image bodies.
+    /// </summary>
+    public async Task<NativeImageAttachmentStageResult> StagePayloadsAsync(
+        IReadOnlyList<NativeImageAttachmentPayload> payloads,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(payloads);
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var addedTokens = new List<string>();
+        try
+        {
+            ThrowIfDisposed();
+            EnsureRegularDirectory(_stagingDirectory);
+            RetryPendingDeletionsUnsafe();
+
+            foreach (var payload in payloads)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (_attachments.Count >= MaximumAttachmentCount)
+                {
+                    return ResultUnsafe(ImageAttachmentError.TooMany);
+                }
+                if (payload is null ||
+                    string.IsNullOrWhiteSpace(payload.Name) ||
+                    string.IsNullOrWhiteSpace(payload.MimeType) ||
+                    string.IsNullOrWhiteSpace(payload.Base64Data))
+                {
+                    return ResultUnsafe(ImageAttachmentError.ReadFailed);
+                }
+
+                var name = Path.GetFileName(payload.Name.Trim());
+                var mimeType = MimeTypeForName(name);
+                if (mimeType is null ||
+                    !string.Equals(mimeType, payload.MimeType.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    return ResultUnsafe(ImageAttachmentError.UnsupportedType);
+                }
+                if (!IsValidName(name))
+                {
+                    return ResultUnsafe(ImageAttachmentError.ReadFailed);
+                }
+                if (_attachments.Values.Any(item =>
+                        string.Equals(
+                            item.Reference.Name,
+                            name,
+                            StringComparison.OrdinalIgnoreCase)))
+                {
+                    return ResultUnsafe(ImageAttachmentError.DuplicateName);
+                }
+
+                byte[] bytes;
+                try
+                {
+                    bytes = Convert.FromBase64String(payload.Base64Data);
+                }
+                catch (FormatException)
+                {
+                    return ResultUnsafe(ImageAttachmentError.ReadFailed);
+                }
+
+                if (bytes.LongLength is <= 0 or > MaximumAttachmentBytes)
+                {
+                    CryptographicOperations.ZeroMemory(bytes);
+                    return ResultUnsafe(ImageAttachmentError.TooLarge);
+                }
+                if (CurrentTotalBytesUnsafe() + bytes.LongLength > MaximumTotalBytes)
+                {
+                    CryptographicOperations.ZeroMemory(bytes);
+                    return ResultUnsafe(ImageAttachmentError.TotalTooLarge);
+                }
+
+                var stageError = await StageBytesUnsafeAsync(
+                        name,
+                        mimeType,
+                        bytes,
+                        addedTokens,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (stageError is not null)
+                {
+                    return ResultUnsafe(stageError);
+                }
+            }
+
+            return ResultUnsafe();
+        }
+        catch (OperationCanceledException)
+        {
+            RollbackAddedTokensUnsafe(addedTokens);
+            throw;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task<ImageAttachmentError?> StageBytesUnsafeAsync(
+        string name,
+        string mimeType,
+        byte[] bytes,
+        List<string> addedTokens,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!await IsValidImageAsync(mimeType, bytes, cancellationToken).ConfigureAwait(false))
+            {
+                return ImageAttachmentError.ContentMismatch;
+            }
+
+            var token = NewToken();
+            var stagedPath = Path.Combine(_stagingDirectory, token + ".image");
+            var committed = false;
+            try
+            {
+                await WriteNewFileAsync(stagedPath, bytes, cancellationToken).ConfigureAwait(false);
+                var reference = new NativeImageAttachmentReference(
+                    token,
+                    name,
+                    mimeType,
+                    bytes.LongLength);
+                _attachments.Add(
+                    token,
+                    new StagedAttachment(reference, stagedPath, SHA256.HashData(bytes)));
+                addedTokens.Add(token);
+                committed = true;
+                return null;
+            }
+            catch (Exception exception) when (IsFileReadFailure(exception))
+            {
+                return ImageAttachmentError.ReadFailed;
+            }
+            finally
+            {
+                if (!committed)
+                {
+                    DeleteOrQueueUnsafe(stagedPath);
+                }
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(bytes);
+        }
+    }
+
+    private void RollbackAddedTokensUnsafe(List<string> addedTokens)
+    {
+        foreach (var token in addedTokens)
+        {
+            if (_attachments.Remove(token, out var staged))
+            {
+                DeleteStagedAttachment(staged);
+            }
+        }
+        RetryPendingDeletionsUnsafe();
     }
 
     public async Task<IReadOnlyList<PromptAttachment>> ResolveAndConsumeAsync(

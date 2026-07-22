@@ -4559,6 +4559,16 @@ describe("Workbench", () => {
   it("shows attachment capability and validation errors without adding invalid data", async () => {
     const bridge = new RecordingBridge();
     render(<Workbench bridge={bridge} />);
+    // Before the engine reports capability, the paperclip stays usable (native picker).
+    expect(screen.getByRole("button", { name: "附加图片" })).toBeEnabled();
+    expect(screen.queryByText("当前引擎不支持图片提示")).not.toBeInTheDocument();
+
+    act(() => bridge.emit({
+      type: "engine/capabilities",
+      sessionId: "session-42",
+      imagePrompts: false,
+      sessionModes: ["default"]
+    }));
     expect(screen.getByRole("button", { name: "附加图片" })).toBeDisabled();
     expect(screen.getByText("当前引擎不支持图片提示")).toBeInTheDocument();
 
@@ -4701,6 +4711,101 @@ describe("Workbench", () => {
 
     expect(composer).toHaveValue("/skill ");
     expect(screen.queryByRole("listbox", { name: "命令与 Skills" })).not.toBeInTheDocument();
+  });
+
+  it("applies built-in /plan and /execute slash modes immediately", () => {
+    const bridge = new RecordingBridge();
+    render(<Workbench bridge={bridge} />);
+    act(() => bridge.emit({
+      type: "engine/capabilities",
+      sessionId: "session-42",
+      imagePrompts: false,
+      sessionModes: ["default", "plan"]
+    }));
+    const composer = screen.getByPlaceholderText("向 AgentDesk 描述任务");
+
+    fireEvent.change(composer, { target: { value: "/plan" } });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect(screen.getByRole("radio", { name: "计划" })).toHaveAttribute("aria-checked", "true");
+    expect(composer).toHaveValue("");
+    expect(screen.getByText("已切换到计划模式。描述任务后发送即可。")).toBeInTheDocument();
+
+    fireEvent.change(composer, { target: { value: "/execute" } });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect(screen.getByRole("radio", { name: "执行" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByText("已切换到执行模式。")).toBeInTheDocument();
+  });
+
+  it("switches the composer model chip and saves provider settings", async () => {
+    const bridge = new RecordingBridge();
+    render(<Workbench bridge={bridge} />);
+    act(() => bridge.emit({
+      type: "provider/status",
+      status: "loaded",
+      baseUrl: "https://api.x.ai/v1",
+      model: "grok-build",
+      backend: "chat_completions",
+      allowInsecureTransport: false,
+      hasCredential: true
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "选择模型" }));
+    fireEvent.click(screen.getByRole("option", { name: "grok-4" }));
+
+    await waitFor(() => expect(bridge.commands).toContainEqual(expect.objectContaining({
+      type: "provider/save",
+      baseUrl: "https://api.x.ai/v1",
+      model: "grok-4",
+      useExistingCredential: true
+    })));
+    expect(screen.getByRole("button", { name: "选择模型" })).toHaveTextContent("grok-4");
+  });
+
+  it("stages pasted images through the host attachment/stage command", async () => {
+    const bridge = new RecordingBridge();
+    render(<Workbench bridge={bridge} />);
+    act(() => bridge.emit({
+      type: "engine/capabilities",
+      sessionId: "session-42",
+      imagePrompts: true,
+      sessionModes: ["default"]
+    }));
+    const composer = screen.getByPlaceholderText("向 AgentDesk 描述任务");
+    const file = new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], "clip.png", {
+      type: "image/png"
+    });
+    // jsdom has no DataTransfer; supply a clipboardData-shaped object.
+    const clipboardData = {
+      files: [file] as unknown as FileList,
+      items: [{
+        kind: "file" as const,
+        type: "image/png",
+        getAsFile: () => file
+      }]
+    };
+    fireEvent.paste(composer, { clipboardData });
+
+    await waitFor(() => expect(commandsOfType(bridge, "attachment/stage")).toHaveLength(1));
+    const stage = lastCommandOfType(bridge, "attachment/stage") as {
+      requestId: string;
+      payloads: Array<{ name: string; mimeType: string; base64Data: string }>;
+    };
+    expect(stage.payloads).toHaveLength(1);
+    expect(stage.payloads[0].name).toBe("clip.png");
+    expect(stage.payloads[0].mimeType).toBe("image/png");
+    expect(stage.payloads[0].base64Data.length).toBeGreaterThan(0);
+
+    act(() => bridge.emit({
+      type: "attachment/changed",
+      requestId: stage.requestId,
+      attachments: [{
+        token: "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+        name: "clip.png",
+        mimeType: "image/png",
+        size: 8
+      }]
+    }));
+    expect(screen.getByText("clip.png")).toBeInTheDocument();
   });
 
   it("flushes memory for the active session and ignores stale completion events", () => {

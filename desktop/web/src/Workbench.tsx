@@ -90,6 +90,20 @@ import "./styles.css";
 
 const defaultProviderBaseUrl = "https://api.x.ai/v1";
 const defaultProviderModel = "grok-build";
+/** Curated models for the composer chip (Codex-style quick switch). Settings still allow any string. */
+const curatedProviderModels = [
+  "grok-build",
+  "grok-4",
+  "grok-3",
+  "grok-3-mini",
+  "grok-code-fast-1",
+  "gpt-4.1",
+  "gpt-4o",
+  "o3",
+  "o4-mini",
+  "claude-sonnet-4",
+  "claude-opus-4"
+] as const;
 const sessionPageSize = 50;
 const sessionListOverscan = 4;
 const taskSidebarWidthStorageKey = "agentdesk.taskSidebarWidth";
@@ -97,6 +111,98 @@ const defaultTaskSidebarWidth = 300;
 const minimumTaskSidebarWidth = 240;
 const maximumTaskSidebarWidth = 560;
 const taskSidebarWidthStep = 16;
+
+function isSupportedPasteImage(file: File): boolean {
+  if (file.type && /^(image\/png|image\/jpeg|image\/gif|image\/webp)$/iu.test(file.type)) {
+    return true;
+  }
+  return /\.(png|jpe?g|gif|webp)$/iu.test(file.name);
+}
+
+function normalizeImageMimeType(type: string, name: string): string {
+  if (/^image\/(png|jpeg|gif|webp)$/iu.test(type)) {
+    return type.toLowerCase();
+  }
+  const extension = name.split(".").pop()?.toLowerCase();
+  switch (extension) {
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    default:
+      return "image/png";
+  }
+}
+
+function sanitizeAttachmentFileName(
+  name: string,
+  mimeType: string,
+  index: number
+): string {
+  const base = (name || "paste").replace(/[\\/]/gu, "_").replace(/[\u0000-\u001f]/gu, "").trim();
+  if (base && /\.(png|jpe?g|gif|webp)$/iu.test(base)) {
+    return base.slice(0, 255);
+  }
+  const extension = mimeType === "image/jpeg"
+    ? "jpg"
+    : mimeType === "image/gif"
+      ? "gif"
+      : mimeType === "image/webp"
+        ? "webp"
+        : "png";
+  return `paste-${index + 1}.${extension}`;
+}
+
+function readFileAsArrayBuffer(file: Blob): Promise<ArrayBuffer> {
+  if (typeof file.arrayBuffer === "function") {
+    return file.arrayBuffer();
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (reader.result instanceof ArrayBuffer) {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error("read_failed"));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("read_failed"));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, offset + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function mergeSlashCommands(
+  builtins: readonly RuntimeCommand[],
+  engineCommands: readonly RuntimeCommand[]
+): RuntimeCommand[] {
+  const seen = new Set<string>();
+  const merged: RuntimeCommand[] = [];
+  for (const command of [...builtins, ...engineCommands]) {
+    const key = command.name.toLocaleLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(command);
+  }
+  return merged;
+}
 
 function clampTaskSidebarWidth(value: number): number {
   if (!Number.isFinite(value)) {
@@ -310,6 +416,9 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   const [providerStatus, setProviderStatus] = useState<"loaded" | "saved" | "error">();
   const [providerMessage, setProviderMessage] = useState("");
   const [replaceProviderCredential, setReplaceProviderCredential] = useState(false);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [customModelDraft, setCustomModelDraft] = useState("");
+  const modelPickerRef = useRef<HTMLDivElement>(null);
   const [engineStatus, setEngineStatus] = useState<EngineStatus>("idle");
   const [engineMessage, setEngineMessage] = useState("");
   const [activeSessionId, setActiveSessionId] = useState<string>();
@@ -375,7 +484,10 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   const [worktreeGcPreview, setWorktreeGcPreview] = useState<WorktreeGcPreview>();
   const [worktreeGcExecuting, setWorktreeGcExecuting] = useState(false);
   const [worktreeReviewDraft, setWorktreeReviewDraft] = useState<WorktreeReviewDraft>();
-  const [imagePrompts, setImagePrompts] = useState(previewMode);
+  // undefined = engine has not reported capability yet; still allow the native
+  // picker so the paperclip is not a silent no-op before the first session binds.
+  const [imagePrompts, setImagePrompts] = useState<boolean | undefined>(
+    previewMode ? true : undefined);
   const [pendingAttachments, setPendingAttachments] = useState<PromptAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<ImageAttachmentError>();
   const [attachmentSelectionPending, setAttachmentSelectionPending] = useState(false);
@@ -582,14 +694,44 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   const windowsAutomationExecuteReady = bridge.available && windowsAutomationHostEnabled &&
     windowsAutomationPending === undefined && windowsAutomationProcessIdValue !== undefined &&
     windowsAutomationSelectorReady;
+  // Grok Build-style mode shortcuts always appear in the palette (in addition to
+  // engine-advertised skills / compact / goal / … from x.ai/commands/list).
+  const builtinSlashCommands: RuntimeCommand[] = [
+    {
+      name: "plan",
+      description: t("slashPlanDescription"),
+      input: { hint: t("slashPlanHint") }
+    },
+    {
+      name: "execute",
+      description: t("slashExecuteDescription"),
+      input: { hint: t("slashModeNoArgs") }
+    },
+    {
+      name: "agent",
+      description: t("slashAgentDescription"),
+      input: { hint: t("slashModeNoArgs") }
+    },
+    {
+      name: "goal",
+      description: t("slashGoalDescription"),
+      input: { hint: t("slashGoalHint") }
+    }
+  ];
   const slashQuery = prompt.startsWith("/") && !/\s/.test(prompt.slice(1))
     ? prompt.slice(1).toLocaleLowerCase()
     : undefined;
   const commandMatches = slashQuery !== undefined && !commandPaletteDismissed
-    ? runtimeCommands.filter((command) => command.name.toLocaleLowerCase().includes(slashQuery) ||
+    ? mergeSlashCommands(builtinSlashCommands, runtimeCommands).filter((command) =>
+      command.name.toLocaleLowerCase().includes(slashQuery) ||
       command.description.toLocaleLowerCase().includes(slashQuery))
     : [];
   const commandPaletteOpen = commandMatches.length > 0;
+  const modelOptions = curatedProviderModels.includes(
+    providerModel as (typeof curatedProviderModels)[number]
+  )
+    ? [...curatedProviderModels]
+    : [providerModel, ...curatedProviderModels];
   const fileReferenceQuery = trailingFileReferenceQuery(prompt);
   const fileReferencePaletteOpen = fileSearchStatus === "loaded" &&
     fileSearchResults.length > 0 && fileReferenceQuery !== undefined;
@@ -648,6 +790,29 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   useEffect(() => {
     return () => clearSessionSwitchTimeout();
   }, []);
+
+  useEffect(() => {
+    if (!modelPickerOpen) {
+      return;
+    }
+    function onPointerDown(event: MouseEvent) {
+      const root = modelPickerRef.current;
+      if (root && event.target instanceof Node && !root.contains(event.target)) {
+        setModelPickerOpen(false);
+      }
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setModelPickerOpen(false);
+      }
+    }
+    window.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [modelPickerOpen]);
 
   useEffect(() => {
     conversationEntriesRef.current = conversationEntries;
@@ -1113,7 +1278,8 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
           updateActiveSessionId(undefined);
           setConversationEntries([]);
           setPermissionQueue([]);
-          setImagePrompts(false);
+          // Capability unknown until the next engine bind reports imagePrompts.
+          setImagePrompts(undefined);
           sessionModesRef.current = ["default"];
           setPlanAvailable(undefined);
         }
@@ -3146,9 +3312,23 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
     engineMessageRef.current = t("engineStarting");
   }
 
+  function attachmentsBusy(): boolean {
+    return Boolean(attachmentRequestIdRef.current) ||
+      engineStatus === "starting" ||
+      engineStatus === "running";
+  }
+
+  function canAttachImages(): boolean {
+    // Allow while capability is unknown; only hard-block after the engine says no.
+    return imagePrompts !== false && !attachmentsBusy();
+  }
+
   function selectImageAttachments() {
-    if (!imagePrompts || attachmentRequestIdRef.current ||
-        engineStatus === "starting" || engineStatus === "running") {
+    if (!canAttachImages()) {
+      if (imagePrompts === false) {
+        setAttachmentError("unsupported_type");
+        setEngineMessage(t("imagePromptsUnsupported"));
+      }
       return;
     }
     const requestId = createMaintenanceRequestId();
@@ -3156,6 +3336,104 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
     setAttachmentSelectionPending(true);
     setAttachmentError(undefined);
     bridge.send({ type: "attachment/select", requestId });
+  }
+
+  async function stageImageFiles(files: FileList | File[]) {
+    if (!canAttachImages()) {
+      if (imagePrompts === false) {
+        setEngineMessage(t("imagePromptsUnsupported"));
+      }
+      return;
+    }
+    const list = Array.from(files);
+    const images = list.filter((file) => isSupportedPasteImage(file));
+    if (images.length === 0) {
+      if (list.length > 0) {
+        setAttachmentError("unsupported_type");
+        setEngineMessage(t("attachmentUnsupportedType"));
+      }
+      return;
+    }
+    if (pendingAttachmentsRef.current.length + images.length > 4) {
+      setAttachmentError("too_many");
+      setEngineMessage(t("attachmentTooMany"));
+      return;
+    }
+
+    const requestId = createMaintenanceRequestId();
+    attachmentRequestIdRef.current = requestId;
+    setAttachmentSelectionPending(true);
+    setAttachmentError(undefined);
+    try {
+      const payloads = await Promise.all(images.map(async (file, index) => {
+        const buffer = await readFileAsArrayBuffer(file);
+        if (buffer.byteLength > 10 * 1024 * 1024) {
+          throw new Error("too_large");
+        }
+        const base64Data = arrayBufferToBase64(buffer);
+        const mimeType = normalizeImageMimeType(file.type, file.name);
+        const name = sanitizeAttachmentFileName(file.name, mimeType, index);
+        return { name, mimeType, base64Data };
+      }));
+      if (attachmentRequestIdRef.current !== requestId) {
+        return;
+      }
+      bridge.send({ type: "attachment/stage", requestId, payloads });
+    } catch (error) {
+      if (attachmentRequestIdRef.current === requestId) {
+        attachmentRequestIdRef.current = undefined;
+        setAttachmentSelectionPending(false);
+      }
+      const code = error instanceof Error && error.message === "too_large"
+        ? "too_large"
+        : "read_failed";
+      setAttachmentError(code);
+      setEngineMessage(t(attachmentErrorKey(code)));
+    }
+  }
+
+  function handleComposerPaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const data = event.clipboardData;
+    if (!data) {
+      return;
+    }
+    const files: File[] = [];
+    // Prefer FileList when present (some hosts only populate files).
+    if (data.files && data.files.length > 0) {
+      files.push(...Array.from(data.files));
+    } else if (data.items && data.items.length > 0) {
+      for (const item of Array.from(data.items)) {
+        if (item.kind === "file") {
+          const file = item.getAsFile();
+          if (file) {
+            files.push(file);
+          }
+        }
+      }
+    }
+    if (files.length === 0) {
+      return;
+    }
+    // Prefer image paste; plain text still works when no files are present.
+    const images = files.filter((file) => isSupportedPasteImage(file));
+    if (images.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    void stageImageFiles(images);
+  }
+
+  function handleComposerDrop(event: React.DragEvent<HTMLTextAreaElement>) {
+    if (!event.dataTransfer?.files?.length) {
+      return;
+    }
+    const images = Array.from(event.dataTransfer.files).filter((file) =>
+      isSupportedPasteImage(file));
+    if (images.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    void stageImageFiles(images);
   }
 
   function removeAttachment(token: string) {
@@ -3445,10 +3723,67 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
   }
 
   function selectRuntimeCommand(command: RuntimeCommand) {
-    setPrompt(`/${command.name} `);
     setCommandPaletteIndex(0);
     setCommandPaletteDismissed(true);
+    const name = command.name.toLocaleLowerCase();
+    // Built-in mode switches: apply immediately (like Grok Build /plan UI), do not
+    // leave a bare slash token for the model unless the command needs arguments.
+    if (name === "plan") {
+      if (planSelectable) {
+        updateSessionMode("plan");
+        setPrompt("");
+        setEngineMessage(t("slashPlanApplied"));
+      } else {
+        setEngineMessage(t("planUnavailable"));
+        setPrompt("");
+      }
+      queueMicrotask(() => composerRef.current?.focus());
+      return;
+    }
+    if (name === "execute" || name === "agent") {
+      updateSessionMode("default");
+      setPrompt("");
+      setEngineMessage(t("slashExecuteApplied"));
+      queueMicrotask(() => composerRef.current?.focus());
+      return;
+    }
+    // /goal and engine skills: insert slash text so the sidecar can resolve it.
+    const hint = command.input?.hint ? " " : " ";
+    setPrompt(`/${command.name}${hint}`);
     queueMicrotask(() => composerRef.current?.focus());
+  }
+
+  function applyComposerModel(model: string, options?: { openSettingsIfNeeded?: boolean }) {
+    const next = model.trim();
+    if (!next || next.length > 256) {
+      return;
+    }
+    setProviderModel(next);
+    setCustomModelDraft(next);
+    setModelPickerOpen(false);
+    const baseUrl = providerBaseUrl.trim();
+    if (!baseUrl || providerValidationMessage) {
+      if (options?.openSettingsIfNeeded !== false) {
+        setSettingsOpen(true);
+        setEngineMessage(t("modelNeedsProviderSettings"));
+      }
+      return;
+    }
+    if (!canReuseProviderCredential) {
+      setSettingsOpen(true);
+      setEngineMessage(t("modelNeedsCredential"));
+      return;
+    }
+    bridge.send({
+      type: "provider/save",
+      baseUrl,
+      model: next,
+      backend: providerBackend,
+      allowInsecureTransport,
+      useExistingCredential: true,
+      replaceCredential: false
+    });
+    setEngineMessage(t("modelSwitching").replace("{model}", next));
   }
 
   function handleComposerKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -4354,6 +4689,13 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
               value={prompt}
               onChange={(event) => updatePrompt(event.target.value)}
               onKeyDown={handleComposerKeyDown}
+              onPaste={handleComposerPaste}
+              onDragOver={(event) => {
+                if (event.dataTransfer?.types?.includes("Files")) {
+                  event.preventDefault();
+                }
+              }}
+              onDrop={handleComposerDrop}
             />
             {commandPaletteOpen && (
               <div
@@ -4460,9 +4802,10 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
                   type="button"
                   className="composer-icon-button"
                   aria-label={t("attachImage")}
-                  title={t("attachImage")}
-                  disabled={!imagePrompts || attachmentSelectionPending ||
-                    engineStatus === "starting" || engineStatus === "running"}
+                  title={imagePrompts === false
+                    ? t("imagePromptsUnsupported")
+                    : t("attachImageHint")}
+                  disabled={!canAttachImages()}
                   onClick={selectImageAttachments}
                 ><Paperclip size={14} /></button>
                 <div
@@ -4541,24 +4884,87 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
                   </span>
                 )}
               </div>
-              {engineStatus === "running" && activeSessionId ? (
-                <button className="stop-button" aria-label={t("stop")} title={t("stop")} onClick={cancelPrompt}>
-                  <Square size={13} fill="currentColor" />
-                </button>
-              ) : (
-                <button
-                  ref={sendButtonRef}
-                  className="send-button"
-                  aria-label={t("send")}
-                  title={t("send")}
-                  disabled={!workspaceReady || (!prompt.trim() && pendingAttachments.length === 0 &&
-                    referencedFiles.length === 0) ||
-                    engineStatus === "starting" ||
-                    engineStatus === "running" ||
-                    !executionProfiles.includes(executionProfile)}
-                  onClick={sendPrompt}
-                ><Send size={17} /></button>
-              )}
+              <div className="composer-right">
+                <div className="model-picker" ref={modelPickerRef}>
+                  <button
+                    type="button"
+                    className="model-picker-trigger"
+                    aria-label={t("modelPicker")}
+                    aria-haspopup="listbox"
+                    aria-expanded={modelPickerOpen}
+                    title={t("modelPickerHint")}
+                    disabled={promptBusy}
+                    onClick={() => {
+                      setCustomModelDraft(providerModel);
+                      setModelPickerOpen((open) => !open);
+                    }}
+                  >
+                    <Bot size={13} aria-hidden="true" />
+                    <span className="model-picker-label">{providerModel || t("modelUnset")}</span>
+                    <ChevronDown size={12} aria-hidden="true" />
+                  </button>
+                  {modelPickerOpen && (
+                    <div
+                      className="model-picker-menu"
+                      role="listbox"
+                      aria-label={t("modelPicker")}
+                    >
+                      <div className="model-picker-custom">
+                        <input
+                          type="text"
+                          value={customModelDraft}
+                          aria-label={t("modelCustom")}
+                          placeholder={t("modelCustomPlaceholder")}
+                          maxLength={256}
+                          onChange={(event) => setCustomModelDraft(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              applyComposerModel(customModelDraft);
+                            }
+                          }}
+                        />
+                        <button
+                          type="button"
+                          className="model-picker-apply"
+                          onClick={() => applyComposerModel(customModelDraft)}
+                        >{t("modelApply")}</button>
+                      </div>
+                      {modelOptions.map((model) => (
+                        <button
+                          key={model}
+                          type="button"
+                          role="option"
+                          aria-selected={model === providerModel}
+                          className={`model-picker-option${model === providerModel ? " active" : ""}`}
+                          onClick={() => applyComposerModel(model)}
+                        >
+                          <span>{model}</span>
+                          {model === providerModel && <Check size={13} aria-hidden="true" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                {engineStatus === "running" && activeSessionId ? (
+                  <button className="stop-button" aria-label={t("stop")} title={t("stop")} onClick={cancelPrompt}>
+                    <Square size={13} fill="currentColor" />
+                  </button>
+                ) : (
+                  <button
+                    ref={sendButtonRef}
+                    className="send-button"
+                    aria-label={t("send")}
+                    title={t("send")}
+                    disabled={!workspaceReady || (!prompt.trim() && pendingAttachments.length === 0 &&
+                      referencedFiles.length === 0) ||
+                      engineStatus === "starting" ||
+                      engineStatus === "running" ||
+                      !executionProfiles.includes(executionProfile)}
+                    onClick={sendPrompt}
+                  ><Send size={17} /></button>
+                )}
+              </div>
             </div>
           </div>
           <div className="composer-status">
@@ -4566,7 +4972,9 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
             <span>{engineMessage || t("localWorkspace")}</span>
             {modeStatusMessage && <><span>·</span><span role="status">{modeStatusMessage}</span></>}
             {!wslAvailable && <><span>·</span><span>{wslUnavailableMessage}</span></>}
-            {!imagePrompts && <><span>·</span><span>{t("imagePromptsUnsupported")}</span></>}
+            {imagePrompts === false && (
+              <><span>·</span><span>{t("imagePromptsUnsupported")}</span></>
+            )}
             {attachmentError && (
               <><span>·</span><span role="alert">{t(attachmentErrorKey(attachmentError))}</span></>
             )}
@@ -5323,6 +5731,9 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
                     />
                     <span>{t("desktopNotificationsEnabled")}</span>
                   </label>
+                  <p className="settings-security-note">
+                    <span>{t("desktopNotificationsHint")}</span>
+                  </p>
                   <label className="provider-checkbox full-access-toggle">
                     <input
                       type="checkbox"

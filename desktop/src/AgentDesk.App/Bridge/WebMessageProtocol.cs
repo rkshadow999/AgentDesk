@@ -161,6 +161,7 @@ public static class WebMessageProtocol
                 "ui/preferences/save" => ParseUiPreferences(root),
                 "attachment/select" => new SelectImageAttachmentsWebCommand(
                     RequiredMaintenanceRequestId(root)),
+                "attachment/stage" => ParseStageImageAttachments(root),
                 "attachment/discard" => ParseDiscardImageAttachments(root),
                 "workspace/select" => new SelectWorkspaceWebCommand(),
                 "workspace/recent/open" => new OpenRecentWorkspaceWebCommand(
@@ -2729,6 +2730,43 @@ public static class WebMessageProtocol
         return new DiscardImageAttachmentsWebCommand(tokens);
     }
 
+    private static StageImageAttachmentsWebCommand ParseStageImageAttachments(JsonElement root)
+    {
+        var requestId = RequiredMaintenanceRequestId(root);
+        if (!root.TryGetProperty("payloads", out var value) ||
+            value.ValueKind is not JsonValueKind.Array)
+        {
+            throw Invalid("The attachment payloads field must be an array.");
+        }
+
+        var payloads = new List<NativeImageAttachmentPayload>();
+        foreach (var candidate in value.EnumerateArray())
+        {
+            if (candidate.ValueKind is not JsonValueKind.Object)
+            {
+                throw Invalid("Each attachment payload must be an object.");
+            }
+            ValidateAllowedProperties(candidate, ["name", "mimeType", "base64Data"]);
+            var name = RequiredBoundedString(
+                candidate,
+                "name",
+                NativeImageAttachmentStore.MaximumAttachmentNameLength);
+            var mimeType = RequiredString(candidate, "mimeType");
+            var base64Data = RequiredString(candidate, "base64Data");
+            if (base64Data.Length > NativeImageAttachmentStore.MaximumAttachmentBytes * 2)
+            {
+                throw Invalid("An attachment payload is too large.");
+            }
+            payloads.Add(new NativeImageAttachmentPayload(name, mimeType, base64Data));
+        }
+
+        if (payloads.Count is 0 or > NativeImageAttachmentStore.MaximumAttachmentCount)
+        {
+            throw Invalid("The attachment payload list is invalid.");
+        }
+        return new StageImageAttachmentsWebCommand(requestId, payloads);
+    }
+
     private static SaveUiPreferencesWebCommand ParseUiPreferences(JsonElement root)
     {
         try
@@ -3093,6 +3131,7 @@ public static class WebMessageProtocol
                     "fontScalePercent"
                 ],
             "attachment/select" => ["requestId"],
+            "attachment/stage" => ["requestId", "payloads"],
             "attachment/discard" => ["tokens"],
             "workspace/select" => [],
             "workspace/recent/open" => ["path"],
@@ -4383,6 +4422,10 @@ public sealed record UpdateApplyWebCommand(string RequestId)
     : MaintenanceWebCommand(RequestId);
 
 public sealed record SelectImageAttachmentsWebCommand(string RequestId) : WebCommand;
+
+public sealed record StageImageAttachmentsWebCommand(
+    string RequestId,
+    IReadOnlyList<NativeImageAttachmentPayload> Payloads) : WebCommand;
 
 public sealed record DiscardImageAttachmentsWebCommand(IReadOnlyList<string> Tokens) : WebCommand;
 
