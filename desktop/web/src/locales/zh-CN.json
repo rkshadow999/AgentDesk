@@ -49,7 +49,7 @@
   "sessionSwitchFailed": "切换会话失败，可重试或新建会话",
   "newSessionFailed": "新建会话失败，请重试",
   "interruptRunningTitle": "中断当前任务？",
-  "interruptRunningBody": "当前会话仍有任务在运行。继续将中断该任务并切换到目标会话（本机为单引擎，无法真正并行多会话）。",
+  "interruptRunningBody": "当前会话仍有任务在运行。确认后将仅中断该会话；其它会话可继续在后台运行（同一引擎进程内多会话并行）。",
   "interruptAndSwitch": "中断并切换",
   "interruptAndNewSession": "中断并新建",
   "stayOnSession": "留在当前会话",

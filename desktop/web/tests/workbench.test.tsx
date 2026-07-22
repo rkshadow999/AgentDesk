@@ -2557,7 +2557,7 @@ describe("Workbench", () => {
     ]);
   });
 
-  it("allows starting a new session while a turn is running and restores cached transcript", () => {
+  it("allows switching sessions while a turn is running without interrupting it", () => {
     const bridge = new RecordingBridge();
     render(<Workbench bridge={bridge} />);
     act(() => {
@@ -2605,24 +2605,29 @@ describe("Workbench", () => {
     expect(screen.getByRole("button", { name: "新建会话" })).toBeEnabled();
     expect(screen.getByText("运行中")).toBeInTheDocument();
 
-    // Switch to another session while the first turn is still "running".
+    // Switch without an interrupt dialog — background turn keeps running.
     fireEvent.click(screen.getByRole("button", { name: "打开会话：空闲会话", hidden: false }));
-    // Confirm interrupt dialog (single-engine supersede).
-    fireEvent.click(screen.getByRole("button", { name: "中断并切换" }));
+    expect(screen.queryByRole("button", { name: "中断并切换" })).not.toBeInTheDocument();
     expect(bridge.commands).toContainEqual({
       type: "session/open",
       sessionId: "session-idle",
       workspacePath: "C:\\workspace",
       executionProfile: "NativeProtected"
     });
-    // Late busy status for the superseded session must not lock the new composer.
+    // Background session can still stream into its cache while focus is elsewhere.
     act(() => {
       bridge.emit({
         type: "engine/status",
         status: "running",
-        message: "已有任务正在运行。",
         sessionId: "session-running",
         engineEpoch: 3
+      });
+      bridge.emit({
+        type: "session/update",
+        sessionId: "session-running",
+        engineEpoch: 3,
+        updateKind: "agent_message_chunk",
+        text: "继续后台"
       });
     });
     act(() => {
@@ -2643,7 +2648,8 @@ describe("Workbench", () => {
     fireEvent.keyDown(idleComposer, { key: "Enter" });
     expect(bridge.commands.filter((c) => c.type === "engine/prompt").length).toBeGreaterThanOrEqual(2);
 
-    fireEvent.click(screen.getByRole("button", { name: "打开会话：运行中的会话" }));
+    // Switch back: cached transcript from the background turn is restored.
+    fireEvent.click(screen.getByRole("button", { name: "打开会话：运行中的会话", hidden: false }));
     act(() => {
       bridge.emit({
         type: "session/active/changed",
@@ -2651,12 +2657,18 @@ describe("Workbench", () => {
         workspacePath: "C:\\workspace",
         engineEpoch: 5
       });
-      bridge.emit({ type: "engine/status", status: "ready", sessionId: "session-running", engineEpoch: 5 });
+      bridge.emit({
+        type: "engine/status",
+        status: "ready",
+        sessionId: "session-running",
+        engineEpoch: 5
+      });
     });
 
     expect(screen.getByText("先做这个任务")).toBeInTheDocument();
-    expect(screen.getByText("后台回复片段")).toBeInTheDocument();
-    // After switch-back the host marks ready — composer must accept input.
+    // Streaming chunks from the focused turn and later background updates append.
+    expect(screen.getByText(/后台回复片段/)).toBeInTheDocument();
+    expect(screen.getByText(/继续后台/)).toBeInTheDocument();
     expect(screen.getByPlaceholderText("向 AgentDesk 描述任务")).not.toBeDisabled();
   });
 

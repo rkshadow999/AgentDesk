@@ -2899,16 +2899,13 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
       setActiveSurface("conversation");
       return;
     }
-    // Codex-style: switching is always allowed. Optimistically project the target
-    // thread and ask the host to supersede any in-flight turn on the single sidecar.
-    const previousId = activeSessionIdRef.current;
+    // True multi-session: switch focus without cancelling other sessions' turns.
+    // Snapshot the previous thread so its stream can keep updating the cache.
     snapshotActiveThreadCache();
-    finalizeSupersededThread(previousId);
     beginSessionSwitch(t("sessionSwitchFailed"));
     setPendingSessionHandoff(undefined);
     setActiveSurface("conversation");
-    setPermissionQueue((requests) =>
-      requests.filter((request) => request.sessionId === session.sessionId));
+    // Keep permission queue entries for other sessions; only filter display later.
     clearPendingAttachments();
 
     activeSessionIdRef.current = session.sessionId;
@@ -2919,14 +2916,24 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
         ? { ...entry, streaming: false }
         : entry));
       setPrompt(cached.prompt);
+      // Restore live busy state for this thread if it is still running in background.
+      const cachedBusy =
+        cached.engineStatus === "running" || cached.engineStatus === "starting";
+      if (runningSessionIdsRef.current.has(session.sessionId) || cachedBusy) {
+        setEngineStatus(
+          cached.engineStatus === "starting" ? "starting" : "running");
+        setEngineMessage(cached.engineMessage || t("running"));
+      } else {
+        setEngineStatus(cached.engineStatus);
+        setEngineMessage(
+          cached.engineStatus === "ready" ? "" : cached.engineMessage);
+      }
     } else {
       setConversationEntries([]);
       setPrompt("");
+      setEngineStatus("starting");
+      setEngineMessage(t("switchingSession"));
     }
-    // Target thread is idle for input until the host finishes loading it.
-    setEngineStatus("starting");
-    setEngineMessage(t("switchingSession"));
-    markSessionRunning(session.sessionId, false);
 
     bridge.send({
       type: "session/open",
@@ -2944,10 +2951,7 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
       setActiveSurface("conversation");
       return;
     }
-    if (isActiveThreadBusy()) {
-      setPendingSessionHandoff({ kind: "open", session });
-      return;
-    }
+    // Switching never requires interrupting another session.
     performOpenSession(session);
   }
 
@@ -2955,16 +2959,13 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
     if (!workspaceReady || !bridge.available) {
       return;
     }
-    const previousId = activeSessionIdRef.current;
     snapshotActiveThreadCache();
-    finalizeSupersededThread(previousId);
     beginSessionSwitch(t("newSessionFailed"));
     setPendingSessionHandoff(undefined);
-    setPermissionQueue([]);
     clearPendingAttachments();
     setActiveSurface("conversation");
     // Leave activeSessionId until host assigns the new id so events for the old
-    // thread do not paint onto an empty "new" projection.
+    // thread continue to paint into its cache while the new session starts.
     setConversationEntries([]);
     setPrompt("");
     setEngineStatus("starting");
@@ -2977,10 +2978,6 @@ export function Workbench({ bridge = defaultHostBridge }: { bridge?: HostBridge 
 
   function startNewSession() {
     if (!workspaceReady || !bridge.available) {
-      return;
-    }
-    if (isActiveThreadBusy()) {
-      setPendingSessionHandoff({ kind: "new" });
       return;
     }
     performStartNewSession();

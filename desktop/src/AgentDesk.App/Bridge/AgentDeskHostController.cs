@@ -110,19 +110,23 @@ public sealed partial class AgentDeskHostController :
     private ExecutionProfile? _executionProfile;
     private string? _engineProviderIdentity;
     private SessionMode? _confirmedSessionMode;
-    private CancellationTokenSource? _promptCancellation;
+    /// <summary>
+    /// Per-session in-flight prompts. Multiple sessions may run concurrently on one
+    /// sidecar; the same session remains single-flight.
+    /// </summary>
+    private readonly Dictionary<string, PromptSlot> _promptSlots =
+        new(StringComparer.Ordinal);
+    private const int MaximumConcurrentPrompts = 3;
     private int _engineGeneration;
     private long _engineEventEpoch;
     private long _nextRuntimeOperationId;
     private long? _worktreeOperationId;
     private long? _activeMutationOperationId;
-    private int _activePromptGeneration;
     private int _crashedGeneration;
     private CrashRecoveryTarget? _crashRecoveryTarget;
     private string _status = "idle";
     private string? _statusMessage;
     private string? _statusSessionId;
-    private bool _promptInProgress;
     private long _maintenanceSequence;
     private long? _activeMaintenanceLeaseId;
     private long _cloudSequence;
@@ -377,7 +381,7 @@ public sealed partial class AgentDeskHostController :
         {
             ThrowIfDisposed();
             await EnsureCrashRecoveryLoadedUnsafeAsync(cancellationToken).ConfigureAwait(false);
-            if (_promptInProgress ||
+            if (AnyPromptInFlightUnsafe() ||
                 _activeMaintenanceLeaseId is not null ||
                 _activeCloudLeaseId is not null)
             {
@@ -493,10 +497,10 @@ public sealed partial class AgentDeskHostController :
         try
         {
             ThrowIfDisposed();
-            if (_promptInProgress ||
-                _activeMutationOperationId is not null ||
-                _activeMaintenanceLeaseId is not null ||
-                _activeCloudLeaseId is not null)
+            if (AnyPromptInFlightUnsafe() ||
+                    _activeMutationOperationId is not null ||
+                    _activeMaintenanceLeaseId is not null ||
+                    _activeCloudLeaseId is not null)
             {
                 throw new InvalidOperationException(BusyMessage);
             }
@@ -524,10 +528,10 @@ public sealed partial class AgentDeskHostController :
         try
         {
             ThrowIfDisposed();
-            if (_promptInProgress ||
-                _activeMutationOperationId is not null ||
-                _activeMaintenanceLeaseId is not null ||
-                _activeCloudLeaseId is not null)
+            if (AnyPromptInFlightUnsafe() ||
+                    _activeMutationOperationId is not null ||
+                    _activeMaintenanceLeaseId is not null ||
+                    _activeCloudLeaseId is not null)
             {
                 throw new InvalidOperationException(BusyMessage);
             }
@@ -882,7 +886,7 @@ public sealed partial class AgentDeskHostController :
         SessionId? sessionId = null;
         CancellationTokenSource? promptCancellation = null;
         CancellationTokenSource? workspaceFileSearchCancellation = null;
-        CancellationTokenSource[] runtimeOperationCancellations = [];
+        List<CancellationTokenSource> runtimeOperationCancellations = [];
         var promptInProgress = false;
         TaskCompletionSource? disposeCompletion = null;
 
@@ -911,10 +915,17 @@ public sealed partial class AgentDeskHostController :
                     host = _host;
                     client = _client;
                     sessionId = _sessionId;
-                    promptCancellation = _promptCancellation;
+                    var promptCancellations = SnapshotAndClearPromptSlotsUnsafe();
+                    promptCancellation = promptCancellations.FirstOrDefault();
                     workspaceFileSearchCancellation = DetachWorkspaceFileSearchUnsafe();
-                    runtimeOperationCancellations = SnapshotRuntimeOperationCancellationsUnsafe();
-                    promptInProgress = _promptInProgress;
+                    runtimeOperationCancellations =
+                        SnapshotRuntimeOperationCancellationsUnsafe().ToList();
+                    promptInProgress = promptCancellations.Count > 0;
+                    // Cancel remaining prompt CTSs after the state gate is released.
+                    foreach (var extra in promptCancellations.Skip(1))
+                    {
+                        runtimeOperationCancellations.Add(extra);
+                    }
                     DetachEngineUnsafe(snapshotRuntimeOperations: false);
                 }
             }
@@ -1645,7 +1656,7 @@ public sealed partial class AgentDeskHostController :
             ThrowIfDisposed();
             try
             {
-                if (_promptInProgress ||
+                if (AnyPromptInFlightUnsafe() ||
                     _activeMutationOperationId is not null ||
                     _activeMaintenanceLeaseId is not null ||
                     _activeCloudLeaseId is not null)
@@ -1837,7 +1848,7 @@ public sealed partial class AgentDeskHostController :
     private (IEngineClient Client, SessionId SessionId) RequireIdleActiveSessionUnsafe(
         string requestedSessionId)
     {
-        if (_promptInProgress || _activeMutationOperationId is not null)
+        if (AnyPromptInFlightUnsafe() || _activeMutationOperationId is not null)
         {
             throw new InvalidOperationException(BusyMessage);
         }
@@ -2145,10 +2156,10 @@ public sealed partial class AgentDeskHostController :
                 throw new InvalidOperationException(InsecureProviderMessage);
             }
             if (requiresIdle &&
-                (_promptInProgress ||
-                 _activeMutationOperationId is not null ||
-                 _activeMaintenanceLeaseId is not null ||
-                 _activeCloudLeaseId is not null))
+                (AnyPromptInFlightUnsafe() ||
+                    _activeMutationOperationId is not null ||
+                    _activeMaintenanceLeaseId is not null ||
+                    _activeCloudLeaseId is not null))
             {
                 throw new InvalidOperationException(BusyMessage);
             }
@@ -2613,10 +2624,10 @@ public sealed partial class AgentDeskHostController :
         {
             ThrowIfDisposed();
             if (requiresIdle &&
-                (_promptInProgress ||
-                 _activeMutationOperationId is not null ||
-                 _activeMaintenanceLeaseId is not null ||
-                 _activeCloudLeaseId is not null))
+                (AnyPromptInFlightUnsafe() ||
+                    _activeMutationOperationId is not null ||
+                    _activeMaintenanceLeaseId is not null ||
+                    _activeCloudLeaseId is not null))
             {
                 throw new InvalidOperationException(BusyMessage);
             }
@@ -2727,10 +2738,8 @@ public sealed partial class AgentDeskHostController :
             {
                 try
                 {
-                    // Codex-style: allow starting a new thread while another turn is active.
-                    // Single sidecar: fully supersede the in-flight turn before restarting.
-                    superseded = SupersedeInFlightPromptUnsafe();
-
+                    // True multi-session: create a new ACP session on the same sidecar
+                    // without cancelling other sessions' in-flight turns.
                     await EnsureUiPreferencesLoadedUnsafeAsync(cancellationToken)
                         .ConfigureAwait(false);
                     await EnsureProviderSettingsLoadedUnsafeAsync(cancellationToken)
@@ -2746,12 +2755,12 @@ public sealed partial class AgentDeskHostController :
                         throw new NotSupportedException(WslStrictUnavailableMessage);
                     }
 
-                    // Force a fresh session/new even if an engine session is already open.
-                    _restartEngineBeforeNextPrompt = true;
                     var context = await EnsureEngineAsync(
                             profile,
                             runtimeOperationCancellations,
-                            cancellationToken)
+                            cancellationToken,
+                            sessionToLoad: null,
+                            forceNewSession: true)
                         .ConfigureAwait(false);
                     CollectRuntimeOperationCancellationsUnsafe(runtimeOperationCancellations);
                     activeEvent = new SessionActiveChangedWebEvent(
@@ -2833,19 +2842,8 @@ public sealed partial class AgentDeskHostController :
                 }
 
                 var targetSession = new SessionId(command.SessionId);
-                // Switching threads always supersedes any in-flight turn on the single sidecar.
-                // Force an engine restart so a previous PromptAsync cannot leave the host busy.
-                if (_promptInProgress ||
-                    (_sessionId is not null &&
-                     !string.Equals(
-                         _sessionId.Value,
-                         targetSession.Value,
-                         StringComparison.Ordinal)))
-                {
-                    superseded = SupersedeInFlightPromptUnsafe();
-                    _restartEngineBeforeNextPrompt = true;
-                }
-
+                // Switching focus must not cancel other sessions or restart the sidecar.
+                // Only load/activate the requested session on the shared engine process.
                 var previousClient = _client;
                 var previousSession = _sessionId;
                 var previousMode = _confirmedSessionMode;
@@ -2858,7 +2856,8 @@ public sealed partial class AgentDeskHostController :
                             command.ExecutionProfile,
                             runtimeOperationCancellations,
                             cancellationToken,
-                            targetSession)
+                            targetSession,
+                            forceNewSession: false)
                         .ConfigureAwait(false);
                     if (!context.Client.Capabilities.LoadSession)
                     {
@@ -2932,7 +2931,10 @@ public sealed partial class AgentDeskHostController :
                         command.SessionId,
                         _confirmedSessionMode.Value,
                         context.Client.Capabilities.Supports(SessionMode.Plan)));
-                Publish(SetStatusUnsafe("ready", null, command.SessionId));
+                // Preserve in-flight status when the opened session is already running.
+                Publish(_promptSlots.ContainsKey(command.SessionId)
+                    ? SetStatusUnsafe("running", null, command.SessionId)
+                    : SetStatusUnsafe("ready", null, command.SessionId));
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {
@@ -3083,8 +3085,8 @@ public sealed partial class AgentDeskHostController :
 
             if (errorEvent is null)
             {
-                if (_promptInProgress ||
-                    _activeMutationOperationId is not null ||
+                // Mutations / maintenance still require a fully idle host.
+                if (_activeMutationOperationId is not null ||
                     _activeMaintenanceLeaseId is not null ||
                     _activeCloudLeaseId is not null)
                 {
@@ -3124,9 +3126,16 @@ public sealed partial class AgentDeskHostController :
                         : WslStrictUnavailableMessage;
                     errorEvent = SetStatusUnsafe("error", message, null);
                 }
+                else if (_promptSlots.Count >= MaximumConcurrentPrompts)
+                {
+                    rejectedEvent = new EngineStatusWebEvent(
+                        "running",
+                        BusyMessage,
+                        _sessionId?.Value,
+                        EngineEpoch: Volatile.Read(ref _engineEventEpoch));
+                }
                 else
                 {
-                    _promptInProgress = true;
                     try
                     {
                         context = await EnsureEngineAsync(
@@ -3134,36 +3143,60 @@ public sealed partial class AgentDeskHostController :
                                 runtimeOperationCancellations,
                                 cancellationToken)
                             .ConfigureAwait(false);
-                        await ConfirmSessionModeAsync(
-                                context,
-                                command.SessionMode,
-                                cancellationToken)
-                            .ConfigureAwait(false);
-                        _ = PromptAttachmentPolicy.Validate(command.Attachments);
-                        if (command.Attachments.Count > 0 &&
-                            !context.Client.Capabilities.ImagePrompts)
+                        // Same session remains single-flight; other sessions may run.
+                        if (_promptSlots.ContainsKey(context.SessionId.Value))
                         {
-                            throw new NotSupportedException(ImagePromptsUnavailableMessage);
+                            rejectedEvent = new EngineStatusWebEvent(
+                                "running",
+                                BusyMessage,
+                                context.SessionId.Value,
+                                EngineEpoch: Volatile.Read(ref _engineEventEpoch));
                         }
-                        promptCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-                            cancellationToken);
-                        _promptCancellation = promptCancellation;
-                        _activePromptGeneration = context.Generation;
-                        errorEvent = SetStatusUnsafe("running", null, context.SessionId.Value);
+                        else
+                        {
+                            await ConfirmSessionModeAsync(
+                                    context,
+                                    command.SessionMode,
+                                    cancellationToken)
+                                .ConfigureAwait(false);
+                            _ = PromptAttachmentPolicy.Validate(command.Attachments);
+                            if (command.Attachments.Count > 0 &&
+                                !context.Client.Capabilities.ImagePrompts)
+                            {
+                                throw new NotSupportedException(ImagePromptsUnavailableMessage);
+                            }
+                            promptCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                                cancellationToken);
+                            _promptSlots[context.SessionId.Value] = new PromptSlot(
+                                context.SessionId,
+                                promptCancellation,
+                                context.Generation);
+                            errorEvent = SetStatusUnsafe(
+                                "running",
+                                null,
+                                context.SessionId.Value);
+                        }
                     }
                     catch (OperationCanceledException)
                         when (cancellationToken.IsCancellationRequested)
                     {
-                        _promptInProgress = false;
-                        _activePromptGeneration = 0;
-                        _ = SetStatusUnsafe("idle", null, null);
+                        if (context is not null)
+                        {
+                            RemovePromptSlotUnsafe(context.SessionId.Value);
+                        }
+                        _ = SetStatusUnsafe("idle", null, _sessionId?.Value);
                         throw;
                     }
                     catch (Exception) when (!cancellationToken.IsCancellationRequested)
                     {
-                        _promptInProgress = false;
-                        _activePromptGeneration = 0;
-                        errorEvent = SetStatusUnsafe("error", EngineErrorMessage, null);
+                        if (context is not null)
+                        {
+                            RemovePromptSlotUnsafe(context.SessionId.Value);
+                        }
+                        errorEvent = SetStatusUnsafe(
+                            "error",
+                            EngineErrorMessage,
+                            context?.SessionId.Value ?? _sessionId?.Value);
                     }
                 }
             }
@@ -3201,7 +3234,8 @@ public sealed partial class AgentDeskHostController :
         ExecutionProfile executionProfile,
         ICollection<CancellationTokenSource> runtimeOperationCancellations,
         CancellationToken cancellationToken,
-        SessionId? sessionToLoad = null)
+        SessionId? sessionToLoad = null,
+        bool forceNewSession = false)
     {
         await EnsureCrashRecoveryLoadedUnsafeAsync(cancellationToken).ConfigureAwait(false);
         await EnsureProviderSettingsLoadedUnsafeAsync(cancellationToken).ConfigureAwait(false);
@@ -3226,20 +3260,99 @@ public sealed partial class AgentDeskHostController :
         {
             throw new InvalidOperationException(CloudPolicyExecutionDeniedMessage);
         }
-        // Only reuse the live client when the caller wants the *current* session
-        // (or no specific session). Loading a different saved session must not
-        // return a stale PromptContext pointing at the previous session id.
+
+        // Reuse the live sidecar for multi-session: switch focus, load a saved
+        // session, or create a new session without killing other turns.
         if (!_restartEngineBeforeNextPrompt &&
             _client is not null &&
             _sessionId is not null &&
-            _executionProfile == executionProfile &&
-            (sessionToLoad is null ||
-             string.Equals(
-                 _sessionId.Value,
-                 sessionToLoad.Value,
-                 StringComparison.Ordinal)))
+            _executionProfile == executionProfile)
         {
-            return new PromptContext(_client, _sessionId, _engineGeneration);
+            if (forceNewSession)
+            {
+                var workspacePath = _workspacePath ??
+                    throw new InvalidOperationException(WorkspaceRequiredMessage);
+                var engineWorkspacePath = string.IsNullOrWhiteSpace(_host?.EngineWorkspacePath)
+                    ? workspacePath
+                    : _host.EngineWorkspacePath!;
+                using var newSessionCancellation =
+                    CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                newSessionCancellation.CancelAfter(_options.AcpHandshakeTimeout);
+                var newSessionId = await _client
+                    .NewSessionAsync(engineWorkspacePath, newSessionCancellation.Token)
+                    .ConfigureAwait(false);
+                _ = ActivateEngineSessionUnsafe(_client, newSessionId);
+                _confirmedSessionMode = SessionMode.Default;
+                await TrySaveCrashRecoveryMarkerUnsafeAsync(
+                        SessionMode.Default,
+                        CrashRecoveryWriteKind.Replace)
+                    .ConfigureAwait(false);
+                Publish(new EngineCapabilitiesChangedWebEvent(
+                    newSessionId.Value,
+                    _client.Capabilities.ImagePrompts,
+                    _client.Capabilities.SessionModes));
+                Publish(new MemoryCapabilitiesWebEvent(
+                    newSessionId.Value,
+                    _client.Capabilities.Memory));
+                Publish(
+                    new SessionModeChangedWebEvent(
+                        newSessionId.Value,
+                        SessionMode.Default,
+                        _client.Capabilities.Supports(SessionMode.Plan)));
+                Publish(SetStatusUnsafe("ready", null, newSessionId.Value));
+                return new PromptContext(_client, newSessionId, _engineGeneration);
+            }
+
+            if (sessionToLoad is null ||
+                string.Equals(
+                    _sessionId.Value,
+                    sessionToLoad.Value,
+                    StringComparison.Ordinal))
+            {
+                return new PromptContext(_client, _sessionId, _engineGeneration);
+            }
+
+            // Load a different saved session onto the same process; keep other slots.
+            if (!_client.Capabilities.LoadSession)
+            {
+                throw new NotSupportedException(
+                    "The engine cannot restore saved sessions.");
+            }
+            var loadWorkspacePath = _workspacePath ??
+                throw new InvalidOperationException(WorkspaceRequiredMessage);
+            var loadEngineWorkspacePath = string.IsNullOrWhiteSpace(_host?.EngineWorkspacePath)
+                ? loadWorkspacePath
+                : _host.EngineWorkspacePath!;
+            using var loadCancellation =
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            loadCancellation.CancelAfter(_options.AcpHandshakeTimeout);
+            _ = await LoadAndActivateSessionAsync(
+                    _client,
+                    sessionToLoad,
+                    loadEngineWorkspacePath,
+                    engineEpoch => Publish(
+                        new SessionActiveChangedWebEvent(
+                            sessionToLoad.Value,
+                            loadWorkspacePath,
+                            engineEpoch)),
+                    loadCancellation.Token)
+                .ConfigureAwait(false);
+            _confirmedSessionMode = SessionMode.Default;
+            Publish(new EngineCapabilitiesChangedWebEvent(
+                sessionToLoad.Value,
+                _client.Capabilities.ImagePrompts,
+                _client.Capabilities.SessionModes));
+            Publish(new MemoryCapabilitiesWebEvent(
+                sessionToLoad.Value,
+                _client.Capabilities.Memory));
+            Publish(
+                new SessionModeChangedWebEvent(
+                    sessionToLoad.Value,
+                    SessionMode.Default,
+                    _client.Capabilities.Supports(SessionMode.Plan)));
+            // Keep ready if other sessions are still running; only mark this focus ready.
+            Publish(SetStatusUnsafe("ready", null, sessionToLoad.Value));
+            return new PromptContext(_client, sessionToLoad, _engineGeneration);
         }
 
         var ownsRecoveryReplacement = sessionToLoad is null && _crashRecoveryTarget is null;
@@ -3547,35 +3660,27 @@ public sealed partial class AgentDeskHostController :
         await _stateGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            var canPublish = !_disposed &&
-                _crashedGeneration != context.Generation &&
-                _engineGeneration == context.Generation &&
-                ReferenceEquals(_client, context.Client) &&
-                string.Equals(_sessionId?.Value, context.SessionId.Value, StringComparison.Ordinal);
-            if (_activePromptGeneration == context.Generation &&
-                ReferenceEquals(_promptCancellation, promptCancellation))
-            {
-                _promptInProgress = false;
-                _activePromptGeneration = 0;
-                _promptCancellation = null;
-            }
-
-            promptCancellation.Dispose();
-
-            // Multi-session: still toast when the focused thread changed mid-run.
-            // Only drop the notification if the engine generation truly died.
             var generationAlive = !_disposed &&
                 _crashedGeneration != context.Generation &&
                 _engineGeneration == context.Generation &&
                 ReferenceEquals(_client, context.Client);
-            if (!canPublish)
+            var slotMatches = _promptSlots.TryGetValue(context.SessionId.Value, out var slot) &&
+                ReferenceEquals(slot.Cancellation, promptCancellation) &&
+                slot.Generation == context.Generation;
+            if (slotMatches)
+            {
+                RemovePromptSlotUnsafe(context.SessionId.Value);
+            }
+
+            promptCancellation.Dispose();
+
+            // Always project completion for the owning session when the engine is alive,
+            // even if the user focused a different thread mid-run.
+            if (!generationAlive)
             {
                 completedEvent = null;
                 statusEvent = null;
-                if (!generationAlive)
-                {
-                    notificationKind = null;
-                }
+                notificationKind = null;
             }
             else if (statusEvent is null)
             {
@@ -3624,14 +3729,12 @@ public sealed partial class AgentDeskHostController :
         try
         {
             ThrowIfDisposed();
-            if (_promptInProgress &&
-                _client is not null &&
-                _sessionId is not null &&
-                string.Equals(_sessionId.Value, command.SessionId, StringComparison.Ordinal))
+            if (_client is not null &&
+                _promptSlots.TryGetValue(command.SessionId, out var slot))
             {
                 client = _client;
-                sessionId = _sessionId;
-                promptCancellation = _promptCancellation;
+                sessionId = slot.SessionId;
+                promptCancellation = slot.Cancellation;
                 engineEpoch = Volatile.Read(ref _engineEventEpoch);
             }
         }
@@ -4075,10 +4178,12 @@ public sealed partial class AgentDeskHostController :
             var recoveryTarget = CreateCrashRecoveryTargetUnsafe();
             var sessionId = recoveryTarget?.SessionId.Value;
             _crashedGeneration = _engineGeneration;
-            promptCancellation = _promptCancellation;
-            _promptInProgress = false;
-            _activePromptGeneration = 0;
-            _promptCancellation = null;
+            var promptCancellations = SnapshotAndClearPromptSlotsUnsafe();
+            promptCancellation = promptCancellations.FirstOrDefault();
+            foreach (var extra in promptCancellations.Skip(1))
+            {
+                runtimeOperationCancellations.Add(extra);
+            }
             DetachEngineUnsafe(runtimeOperationCancellations);
             _crashRecoveryTarget = recoveryTarget;
 
@@ -4138,10 +4243,12 @@ public sealed partial class AgentDeskHostController :
             var recoveryTarget = CreateCrashRecoveryTargetUnsafe();
             var sessionId = recoveryTarget?.SessionId.Value;
             _crashedGeneration = _engineGeneration;
-            promptCancellation = _promptCancellation;
-            _promptInProgress = false;
-            _activePromptGeneration = 0;
-            _promptCancellation = null;
+            var promptCancellations = SnapshotAndClearPromptSlotsUnsafe();
+            promptCancellation = promptCancellations.FirstOrDefault();
+            foreach (var extra in promptCancellations.Skip(1))
+            {
+                runtimeOperationCancellations.Add(extra);
+            }
             DetachEngineUnsafe(runtimeOperationCancellations);
             _crashRecoveryTarget = recoveryTarget;
             statusEvent = SetStatusUnsafe(
@@ -4520,28 +4627,80 @@ public sealed partial class AgentDeskHostController :
             ? english
             : chinese;
 
+    private bool AnyPromptInFlightUnsafe() => _promptSlots.Count > 0;
+
+    private void RemovePromptSlotUnsafe(string sessionId) =>
+        _promptSlots.Remove(sessionId);
+
+    private CancellationTokenSource? SnapshotPrimaryPromptCancellationUnsafe()
+    {
+        foreach (var slot in _promptSlots.Values)
+        {
+            return slot.Cancellation;
+        }
+        return null;
+    }
+
     /// <summary>
-    /// Clears the host-side in-flight prompt markers and forces the next
-    /// <see cref="EnsureEngineAsync"/> call to restart the sidecar. Callers must
-    /// dispose the returned CTS and may best-effort cancel the old engine session.
+    /// Snapshot every prompt CTS so callers can cancel them **outside**
+    /// <see cref="_stateGate"/> (cancel callbacks must not re-enter the gate).
+    /// </summary>
+    private List<CancellationTokenSource> SnapshotAndClearPromptSlotsUnsafe()
+    {
+        var cancellations = _promptSlots.Values
+            .Select(slot => slot.Cancellation)
+            .Where(static cts => cts is not null)
+            .Cast<CancellationTokenSource>()
+            .ToList();
+        _promptSlots.Clear();
+        return cancellations;
+    }
+
+    private void ClearAllPromptSlotsUnsafe(bool cancel)
+    {
+        if (!cancel)
+        {
+            _promptSlots.Clear();
+            return;
+        }
+
+        // Prefer SnapshotAndClear + cancel outside the gate. Keep this for
+        // dispose paths that already cancel after release via a single CTS.
+        _promptSlots.Clear();
+    }
+
+    /// <summary>
+    /// Cancels all in-flight prompts and forces the next
+    /// <see cref="EnsureEngineAsync"/> call to restart the sidecar. Used for
+    /// workspace teardown / crash recovery — not for ordinary session switching.
     /// </summary>
     private SupersededPrompt? SupersedeInFlightPromptUnsafe()
     {
-        if (!_promptInProgress && _promptCancellation is null)
+        if (_promptSlots.Count == 0)
         {
-            // Still force a restart when switching sessions so a lingering ACP
-            // turn cannot reject the next engine/prompt with BusyMessage.
-            if (_client is not null || _sessionId is not null)
-            {
-                _restartEngineBeforeNextPrompt = true;
-            }
             return null;
         }
 
-        var superseded = new SupersededPrompt(_client, _sessionId, _promptCancellation);
-        _promptInProgress = false;
-        _activePromptGeneration = 0;
-        _promptCancellation = null;
+        // Prefer the focused session for best-effort engine cancel; all CTS are cancelled.
+        PromptSlot? focused = null;
+        if (_sessionId is not null)
+        {
+            _ = _promptSlots.TryGetValue(_sessionId.Value, out focused);
+        }
+        focused ??= _promptSlots.Values.FirstOrDefault();
+        var superseded = focused is null
+            ? null
+            : new SupersededPrompt(_client, focused.SessionId, focused.Cancellation);
+        // Cancel outside the caller's gate when possible; for supersede used under
+        // the gate we still cancel here because callers dispose after release.
+        var leftovers = SnapshotAndClearPromptSlotsUnsafe();
+        foreach (var cts in leftovers)
+        {
+            if (!ReferenceEquals(cts, focused?.Cancellation))
+            {
+                TryCancel(cts);
+            }
+        }
         _restartEngineBeforeNextPrompt = true;
         return superseded;
     }
@@ -4916,6 +5075,11 @@ public sealed partial class AgentDeskHostController :
     private sealed record PromptContext(
         IEngineClient Client,
         SessionId SessionId,
+        int Generation);
+
+    private sealed record PromptSlot(
+        SessionId SessionId,
+        CancellationTokenSource Cancellation,
         int Generation);
 
     private sealed record CrashRecoveryTarget(

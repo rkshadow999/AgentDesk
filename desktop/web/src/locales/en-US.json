@@ -49,7 +49,7 @@
   "sessionSwitchFailed": "Could not switch sessions. Retry or start a new session.",
   "newSessionFailed": "Could not create a new session. Please retry.",
   "interruptRunningTitle": "Interrupt the running task?",
-  "interruptRunningBody": "This session still has a turn in progress. Continue will cancel it and switch (AgentDesk uses one engine process, so turns cannot truly run in parallel).",
+  "interruptRunningBody": "This session still has a turn in progress. Confirming cancels only this session; other sessions can keep running in the background (parallel turns on one engine process).",
   "interruptAndSwitch": "Interrupt and switch",
   "interruptAndNewSession": "Interrupt and create new",
   "stayOnSession": "Stay here",
